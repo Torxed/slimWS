@@ -4,15 +4,25 @@ from hashlib import sha1
 from json import loads, dumps
 from select import epoll, EPOLLIN
 from struct import pack, unpack
+from datetime import date, datetime
 
-from helpers import *
-from api import gh_api
-from api import crispy
+#from helpers import *
+from api import uniauth
+from api import general
+from api import messages
+from api import profile
+from api import rooms
 
-# B = 1
-# H = 2
-# I = 4
-# Q = 8
+LEVEL = 2
+def log(*args, **kwargs):
+	if not 'level' in kwargs or kwargs['level'] >= LEVEL:
+		print(args, kwargs)
+
+def json_serial(obj):
+	if isinstance(obj, (datetime, date)):
+		return obj.isoformat()
+
+	raise TypeError('Type {} is not serializable'.format(type(obj)))
 
 def list_to_dict(_list_):
 	# TODO: Verify that the length is dividable with 2.
@@ -22,22 +32,124 @@ def list_to_dict(_list_):
 		result[item] = b[index]
 	return result
 
+class ws_packet():
+	def __init__(self, data):
+		## == Some initial checks, to see if we got all the data, the opcode etc.
+		flags = '{0:0>8b}'.format(unpack('B', bytes([data[0]]))[0])
+		fin, rsv1, rsv2, rsv3 = [True if x == '1' else False for x in flags[0:4]]
+		opcode = int(flags[4:8], 2)
+		
+		self.flags = {'fin' : fin, 'rsv1' : rsv1, 'rsv2' : rsv2, 'rsv3' : rsv3, 'mask' : None}
+		self.opcode = opcode
+		self.payload_len = 0
+		self.mask_key = None
+		self.data = b''
+		self.carryOver = b''
+		log('Flags:', self.flags, level=1)
+		log('OpCode:', self.opcode, level=1)
+		
+		## == We skip the first 0 index because data[index 0] is the [fin,rsv1,rsv2,rsv3,opcode] byte.
+		self.data_index = 1
+		
+		if fin:
+			if len(data) >= 2 and self.payload_len == 0:
+				## == Check the initial length of the payload.
+				##    Websockets have 3 conditional payload lengths:
+				##	  * https://stackoverflow.com/questions/18271598/how-to-work-out-payload-size-from-html5-websocket
+				self.payload_len = unpack('B', bytes([data[self.data_index]]))[0]
+				self.payload_len = '{0:0>8b}'.format(self.payload_len)
+
+				self.flags['mask'], self.payload_len = (True if self.payload_len[0] == '1' else False), int('{:0>8}'.format(self.payload_len[1:]), 2)
+				self.data_index += 1
+
+			# B = 1
+			# H = 2
+			# I = 4
+			# Q = 8
+
+			## == TODO: When we've successfully established the payload length,
+			##          make sure we actually have recieved that much data.
+			##          (for instance, recv(1024) might get the header, but not the full length)
+
+			## == CONDITION 1: The length is less than 126 - Which means whatever length this is, is the actual payload length.
+			if self.payload_len < 126:
+				log('Len:', self.payload_len, level=1)
+
+			## == CONDITION 2: Length is 126, which means the next [2 bytes] are the length.
+			elif self.payload_len == 126 and len(data) >= self.data_index+2:
+				self.payload_len = unpack('>H', data[self.data_index:self.data_index+2])[0]
+				self.data_index += 2
+				log('Large payload:', self.payload_len, level=1)
+
+			## == Condition 3: Length is 127, which means the next [8] bytes are the length.
+			elif self.payload_len == 127 and len(data) >= self.data_index+2:
+				self.payload_len = unpack('>Q', data[self.data_index:self.data_index+8])[0]
+				self.data_index += 2
+				log('Huge payload:', self.payload_len, level=1)
+
+			## == We try to see if the package is XOR:ed (mask=True) and data length is larger than 4.
+			if self.flags['mask'] and len(data) >= self.data_index+4:
+				#mask_key = unpack('I', ws[parsed_index:parsed_index+4])[0]
+				self.mask_key = data[self.data_index:self.data_index+4]
+				log('Mask key:', self.mask_key, level=1)
+				self.data_index += 4
+
+			if self.flags['mask']:
+				self.data = b''
+				log('[XOR::Data]:', data[self.data_index:self.data_index+self.payload_len], level=1)
+				for index, c in enumerate(data[self.data_index:self.data_index+self.payload_len]):
+					self.data += bytes([c ^ self.mask_key[(index%4)]])
+
+				## == carry over the remainer.
+				self.carryOver = data[self.data_index+self.payload_len:]
+
+				log('[   ::Data]:', self.data, level=2)
+				if self.data == b'PING':
+					self.data = b''
+					return
+				#self.ws_send(b'Pong')
+				try:
+					self.data = loads(self.data.decode('UTF-8'))
+				except UnicodeDecodeError:
+					log('[ERROR] UnicodeDecodeError:', self.data, level=1)
+					self.data = b''
+					return
+				except Exception as e:
+					print(e)
+
+				#log('<<', self.data, level=1)
+				# retData = self.parsers[parser].protocol.parse(data, self.headers, self.sock.fileno(), self.addr)
+				# if retData:
+				# 	log('>>', retData, level=1)
+				# 	self.ws_send(retData)
+
+	def __enter__(self):
+		return self
+
+	def __exit__(self):
+		pass
+
+	def getRemainder(self):
+		tmp = self.carryOver
+		self.carryOver = b''
+		return tmp
+
 class ws_client():
-	def __init__(self, sock, addr, parsers={}):
+	def __init__(self, sock, addr, data=b''):
 		self.sock = sock
 		self.addr = addr
 		self.state = 'HTTP'
-		self.data = b''
+		self.data = data
 		self.closed = False
 
-		self.ws_packet = {'flags' : {'fin' : None, 'rsv1' : None, 'rsv2' : None, 'rsv3' : None, 'mask' : None},
-				'optcode' : None,
-				'payload_len' : 0,
-				'mask_key' : None}
-		self.ws_index = 0
+		#self.ws_packet = {'flags' : {'fin' : None, 'rsv1' : None, 'rsv2' : None, 'rsv3' : None, 'mask' : None},
+		#		'opcode' : None,
+		#		'payload_len' : 0,
+		#		'mask_key' : None}
+		#self.ws_index = 0
 
 		self.headers, self.payload = None, None
-		self.parsers = parsers
+		self.parsers = {'api:uniauth' : uniauth, 'api:general' : general, 'api:message' : messages, 'api:profile' : profile, 'api:rooms' : rooms}
 
 	def http_parse(self, d):
 		if len(d) <= 0:
@@ -52,11 +164,40 @@ class ws_client():
 			headers[key.strip(b' \\;,.\r\n')] = val.strip(b' \\;,.\r\n')
 		return headers, payload
 
+	def parse(self):
+		## TODO: Large data streams could end up clogging the pipepine for other clients.
+		
+		while 1:
+			if len(self.data) <= 0:
+				break # No more data here
+
+			log('\n[Parsing packet]:', self.data, level=1)
+			## == Set up a ws_packet() based on all the data the client has sent us.
+			packet = ws_packet(self.data)
+
+			## == If we've recieved all the data, set the ws_client() internal data to
+			##    any remainder the ws_packet() might have since the client might have sent
+			##    two packets in one transfer, the next loop we'll set up a new ws_packet() with the remainder.
+
+			if packet.flags['fin']:
+				self.data = packet.getRemainder()
+
+				if packet.data == b'':
+					continue
+
+				## == Call all our parsers and yield any data they have.
+				for parser in self.parsers:
+					yield self.parsers[parser].protocol.parse(packet.data, self.headers, self.sock.fileno(), self.addr)
+
+			else:
+				## == Still waiting for more data to arrive.
+				break
+
 	def ws_send(self, data, SPLIT=False):
-		log('\n[Structuring a packet]')
+		log('\n[Structuring a packet]', level=1)
 
 		if type(data) == dict:
-			data = dumps(data)
+			data = dumps(data, default=json_serial)
 		if type(data) != bytes:
 			data = bytes(str(data), 'UTF-8')
 
@@ -65,11 +206,11 @@ class ws_client():
 
 		for index, segment in enumerate(data):
 			packet = b''
-			## Add the flags + optcode (0 == continuation frame, 1 == text, 2 == binary, 8 == con close, 9 == ping, A == pong)
+			## Add the flags + opcode (0 == continuation frame, 1 == text, 2 == binary, 8 == con close, 9 == ping, A == pong)
 			last_segment = True if index == len(data)-1 else False
-			fin, rsv1, rsv2, rsv3, optcode = (b'1' if last_segment else b'0'), b'0', b'0', b'0', bytes('{:0>4}'.format('1' if last_segment else '0'), 'UTF-8') # .... (....)
-			#log(b''.join([fin, rsv1, rsv2, rsv3, optcode]).decode('UTF-8'), end=' ')
-			packet += pack('B', int(b''.join([fin, rsv1, rsv2, rsv3, optcode]), 2))
+			fin, rsv1, rsv2, rsv3, opcode = (b'1' if last_segment else b'0'), b'0', b'0', b'0', bytes('{:0>4}'.format('1' if last_segment else '0'), 'UTF-8') # .... (....)
+			#log(b''.join([fin, rsv1, rsv2, rsv3, opcode]).decode('UTF-8'), level=1)
+			packet += pack('B', int(b''.join([fin, rsv1, rsv2, rsv3, opcode]), 2))
 
 			mask = b'0'
 			if mask == b'1':
@@ -87,33 +228,34 @@ class ws_client():
 
 			elif payload_len >= 126: # 2 bytes INT
 				extended_len = pack('!H', payload_len)
-				log(b''.join([mask, bytes('{0:0>7b}'.format(126), 'UTF-8')]))
+				log(b''.join([mask, bytes('{0:0>7b}'.format(126), 'UTF-8')]), level=1)
 				payload_len = pack('B', int(b''.join([mask, bytes('{0:0>7b}'.format(126), 'UTF-8')]),2))
 			else:
 				extended_len = b''
-				#log(b''.join([mask, bytes('{0:0>7b}'.format(payload_len), 'UTF-8')]).decode('UTF-8'), end=' ')
+				#log(b''.join([mask, bytes('{0:0>7b}'.format(payload_len), 'UTF-8')]).decode('UTF-8'), end=' ', level=1)
 				payload_len = pack('B', int(b''.join([mask, bytes('{0:0>7b}'.format(payload_len), 'UTF-8')]),2))
 
 			# Payload len is padded with mask
 			packet += payload_len + extended_len + mask_key + segment
-			log('[Flags::Data]:', {'fin': fin, 'rsv1': rsv1, 'rsv2': rsv2, 'rsv3': rsv3, 'mask': True if mask == b'1' else False, 'OpCode':optcode, 'len' : len(segment), 'mask_key' : mask_key}, segment)
+			log('[Flags::Data]:', {'fin': fin, 'rsv1': rsv1, 'rsv2': rsv2, 'rsv3': rsv3, 'mask': True if mask == b'1' else False, 'OpCode':opcode, 'len' : len(segment), 'mask_key' : mask_key}, segment, level=1)
 
 			#log(data.decode('UTF-8'))
-			log('[Final::Data]:', packet)
+			log('[Final::Data]:', packet, level=1)
 			self.sock.send(packet)
 
 	def recv(self, buf=8192):
 		self.data += self.sock.recv(buf)
 
 		if len(self.data) == 0:
-			log('[Socket disconnected]')
+			log('[Socket disconnected]', level=2)
 			self.sock.close()
 			self.closed = True
 			return
 
 		if b'\r\n\r\n' in self.data and self.state == 'HTTP':
 			self.headers, self.payload = self.http_parse(self.data)
-			print(self.headers)
+			#log(self.headers, level=1)
+			#log(self.payload, level=1)
 
 			if b'Sec-WebSocket-Key' in self.headers and \
 			  b'Upgrade' in self.headers and b'Connection' in self.headers and \
@@ -129,117 +271,116 @@ class ws_client():
 				resp += b'Sec-WebSocket-Accept: ' + b64encode(hash) + b'\r\n'
 				resp += b'\r\n'
 
-				log('[Connection upgraded]')
+				log('[Connection upgraded]', level=1)
 				self.data = b''
-				self.ws_index = 0
+				#self.ws_index = 0
 				self.state = 'WEBSOCK'
 
 				self.sock.send(resp)
 			else:
 				resp = b'HTTP/1.1 404 Not Found\r\n\r\n'
+				#log'>>> 404:', self.headers, self.payload)
 				self.sock.send(resp)
 				self.sock.close()
 				self.closed = True
+				return
 
 		elif self.state == 'WEBSOCK':
-			log('\n[Parsing packet]:', self.data)
-			if len(self.data) >= 1 and self.ws_packet['flags']['fin'] is None:
-				flags = '{0:0>8b}'.format(unpack('B', bytes([self.data[self.ws_index]]))[0])
-				fin, rsv1, rsv2, rsv3 = [True if x == '1' else False for x in flags[0:4]]
-				opcode = int(flags[4:8], 2)
-				self.ws_packet['flags']['fin'] = fin
-				self.ws_packet['flags']['rsv1'] = fin
-				self.ws_packet['flags']['rsv2'] = fin
-				self.ws_packet['flags']['rsv3'] = fin
-				self.ws_packet['optcode'] = opcode
-				log('Flags:', self.ws_packet['flags'])
-				log('OpCode:', self.ws_packet['optcode'])
-				self.ws_index += 1
+			for data in self.parse():
+				if data is None: continue
 
-			if len(self.data) >= 2 and self.ws_packet['payload_len'] == 0:
-				self.ws_packet['payload_len'] = unpack('B', bytes([self.data[self.ws_index]]))[0]
-				self.ws_packet['payload_len'] = '{0:0>8b}'.format(self.ws_packet['payload_len'])
-				self.ws_packet['flags']['mask'], self.ws_packet['payload_len'] = (True if self.ws_packet['payload_len'][0] == '1' else False), int('{:0>8}'.format(self.ws_packet['payload_len'][1:]), 2)
-				self.ws_index += 1
+				log('>>', data, level=1)
+				self.ws_send(data)
 
-			if self.ws_packet['payload_len'] < 126:
-				log('Len:', self.ws_packet['payload_len'])
+#x = ws_client(None, None, b'\x81\xfe\x00\xd2\xa9\xbc\xc6\n\xd2\x9e\xb5o\xd8\xc9\xa3d\xca\xd9\x99d\xdb\x9e\xfc(\x9f\xd9\xa5>\x9a\xd8\xa7>\x98\x85\xa5n\xcc\xda\xf1<\xcc\xda\xfe2\x9d\x8d\xa4o\xca\x8f\xf1?\x99\x88\xf2i\xcb\x84\xf3=\x9a\x8e\xf79\x9a\x8c\xf0h\x9e\x85\xf0;\xcc\x84\xa4k\x90\xdd\xf6n\x99\x8c\xa79\xcc\x85\xf0i\x8b\x90\xe4e\xd9\xd9\xb4k\xdd\xd5\xa9d\x8b\x86\xe4{\xdc\xd9\xb4s\x8b\x90\xe4e\xcb\xd6\xa3i\xdd\x9e\xfc(\x84\x91\xa7f\xc5\xcc\xaak\xd0\xd9\xb4y\x84\x91\xe4&\x8b\xdd\xa5i\xcc\xcf\xb5U\xdd\xd3\xado\xc7\x9e\xfc(\xc8\x8b\xf6<\xca\xdf\xa52\x99\x8c\xf6k\xcf\x8c\xfe9\xca\x8d\xa29\xcf\x85\xf48\xcf\xd9\xa2i\x9b\x89\xa0n\x9e\x8f\xf2l\x9e\x8b\xa3?\x9b\x85\xf62\x9f\xd9\xf6l\xcf\x8c\xff=\x91\x88\xa7l\x9a\x8d\xf6l\x9c\x8d\xa2h\x8b\xc1\x81\xfe\x01\'\x90\n\x96i\xeb(\xe5\x0c\xe1\x7f\xf3\x07\xf3o\xc9\x07\xe2(\xacK\xa6o\xf5]\xa3n\xf7]\xa13\xf5\r\xf5l\xa1_\xf5l\xaeQ\xa4;\xf4\x0c\xf39\xa1\\\xa0>\xa2\n\xf22\xa3^\xa38\xa7Z\xa3:\xa0\x0b\xa73\xa0X\xf52\xf4\x08\xa9k\xa6\r\xa0:\xf7Z\xf53\xa0\n\xb2&\xb4\x06\xe0o\xe4\x08\xe4c\xf9\x07\xb20\xb4\x18\xe5o\xe4\x10\xb2&\xb4\x06\xf2`\xf3\n\xe4(\xacK\xf3b\xf7\x1d\xb2&\xb4\x08\xe3y\xf3\x1d\xb20\xb4\x1b\xffe\xfb6\xfcc\xe5\x1d\xb2&\xb4\x06\xe7d\xf3\x1b\xb20\xb4\n\xa1k\xf3Z\xa72\xf0\x08\xf39\xa0X\xa0k\xf0X\xf6o\xa7Q\xf4;\xa6Z\xa82\xaf[\xf32\xa1]\xf5?\xa6]\xa7i\xf7\x0f\xa9k\xa3Z\xa3:\xae[\xf6i\xa3]\xa2h\xa4\x0c\xa28\xf7^\xa08\xa5K\xbc(\xf7\n\xf3o\xe5\x1a\xcf~\xf9\x02\xf5d\xb4S\xb2k\xa1Y\xa6i\xf5\n\xa8:\xa6Y\xf1l\xa6Q\xa3i\xa7\r\xa3l\xaf[\xa2l\xf3\r\xf38\xa3\x0f\xf4=\xa5]\xf6=\xa1\x0c\xa58\xafY\xa8<\xf3Y\xf6l\xa6P\xa72\xa2\x08\xf69\xa7Y\xf6?\xa7\r\xf2(\xeb\x81\xfe\x01*7\x11Z\xeeL3)\x8bFd?\x80Tt\x05\x80E3`\xcc\x01t9\xda\x04u;\xda\x06(9\x8aRwm\xd8Rwb\xd6\x03 8\x8bT"m\xdb\x07%n\x8dU)o\xd9\x04#k\xdd\x04!l\x8c\x00(l\xdfR)8\x8f\x0epj\x8a\x07!;\xddR(l\x8d\x15=x\x81Gt(\x8fCx5\x80\x15+x\x9fBt(\x97\x15=x\x81U{?\x8dC3`\xccCt;\x83Gc5\x88^}?\x9d\x15=x\x8fDb?\x9a\x15+x\x9eBs=\xcc\x1b3;\x8dTt)\x9dhe5\x85R\x7fx\xd4\x15pm\xde\x01r9\x8d\x0f!j\xdeVwj\xd6\x04rk\x8a\x04wc\xdc\x05w?\x8aT#o\x88S&i\xdaQ&m\x8b\x02#c\xde\x0f\'?\xdeQwj\xd7\x00)n\x8fQ"k\xdeQ$k\x8aU3v\xccXf4\x8bE3`\xccT ;\x8b\x04&b\x88Vri\xd8\x06!;\x88\x06w?\xdf\x0fuk\xde\x04)b\xd7\x05rb\xd9\x03to\xde\x03&9\x8fQ(;\xdb\x04"j\xd6\x05w9\xdb\x03#8\xdcR#h\x8f\x00!h\xdd\x15l')
+#x.parse()
+#exit(1)
 
-			elif self.ws_packet['payload_len'] == 126 and len(self.data) >= self.ws_index+2:
-				extended_payload_len = unpack('H', self.data[self.ws_index:self.ws_index+2])[0]
-				self.ws_index += 2
-				log('Large payload:', extended_payload_len)
-			elif self.ws_packet['payload_len'] >= 127 and len(self.data) >= self.ws_index+8:
-				extended_payload_len = unpack('Q', self.data[self.ws_index:self.ws_index+8])[0]
-				self.ws_index += 8
-				log('Huge payload:', extended_payload_len)
+_rooms = {'someone-anton@example.com' : {
+			'participants' : {'anton@' : {}, 'someone@' : {}},
+			'displayname' : 'Someone Private Conv',
+			'messages' : {
+				'1': {'from' : 'anton@', 'to' : 'someone@', 'message' : 'Hello (1)'},
+				'2' : {'from' : 'someone@', 'to' : 'anton@', 'message' : 'Hi (2)'},
+				'5' : {'from' : 'anton@', 'to' : 'someone@', 'message' : 'Sup? (5)'}}},
+		'lobby@example.com' : {
+			'participants' : {'anton@' : {}, 'someone@' : {}},
+			'displayname' : 'Main Lobby',
+			'messages' : {
+				'3' : {'from' : 'outsider@newdomain.com', 'to' : 'anton@', 'message' : 'morning!(3)',
+				'4' : {'from' : 'anton@', 'to' : 'outsider@newdomain.com', 'message' : 'Good morning! (4)'}}}
+			}
+		}
 
-			if self.ws_packet['flags']['mask'] and len(self.data) >= self.ws_index+4:
-				#mask_key = unpack('I', ws[parsed_index:parsed_index+4])[0]
-				self.ws_packet['mask_key'] = self.data[self.ws_index:self.ws_index+4]
-				log('Mask key:', self.ws_packet['mask_key'])
-				self.ws_index += 4
+_users = {'example.com' : {
+			'anton' : {'username' : 'anton',
+					   '_password' : 'test',
+					   'domain' : 'example.com',
+					   'roomData' : {'active_room' : 'someone-anton@example.com'},
+					   'displayname' : 'Anton Hvornum',
+					   'theme' : 'dark',
+					   'endpoints' : {},
 
-			if self.ws_packet['flags']['mask']:
-				data = b''
-				log('[XOR::Data]:', self.data[self.ws_index:])
-				for index, c in enumerate(self.data[self.ws_index:]):
-					data += bytes([c ^ self.ws_packet['mask_key'][(index%4)]])
+					   'friendslist' : {'someone@example.com' : {}},
+					   'roomlist' : {'someone-anton@example.com' : {},
+					   				 'lobby@example.com' : {}}
+			}, 'someone' : {'username' : 'someone',
+						 '_password' : 'test',
+						 'domain' : 'example.com',
+						 'roomData' : {'active_room' : 'someone-anton@example.com'},
+						 'displayname' : 'Someone 92',
+						 'theme' : 'dark',
+						 'endpoints' : {},
 
-				log('[   ::Data]:', data)
-				#self.ws_send(b'Pong')
-				try:
-					data = loads(data.decode('UTF-8'))
-				except UnicodeDecodeError:
-					self.sock.close()
-					self.closed = True
-					return 
+						 'friendslist' : {'someone@example.com' : {}},
+						 'roomlist' : {'someone-anton@example.com' : {}}
+			}
+		}
+}
 
-				for parser in self.parsers:
-					data = self.parsers[parser].protocol.parse(data, self.headers, self.sock.fileno(), self.addr)
-					self.ws_send(data)
-
-			if self.ws_packet['flags']['fin']:
-				#self.sock.close()
-				#self.closed = True
-				self.data = b'' # Does not support multiple buffered blocks (see if mask:)
-				self.ws_index = 0
-				self.ws_packet = {'flags' : {'fin' : None, 'rsv1' : None, 'rsv2' : None, 'rsv3' : None, 'mask' : None},
-						  'optcode' : None,
-						  'payload_len' : 0,
-						  'mask_key' : None}
+# sessions[UID] = {'domain' : data['domain'], 'username' : data['username']}
 
 s = socket()
 s.setsockopt(SOL_SOCKET, SO_REUSEADDR, 1)
 
-s.bind(('', 8010))
+s.bind(('', 1337))
 s.listen(4)
 
-clients = {}
+try:
+	__builtins__.__dict__['clients'] = {}
+	__builtins__.__dict__['io'] = {}
+	__builtins__.__dict__['sessions'] = {}
+	__builtins__.__dict__['rooms'] = _rooms
+	__builtins__.__dict__['users'] = _users
+except:
+	__builtins__['clients'] = {}
+	__builtins__['io'] = {}
+	__builtins__['sessions'] = {}
+	__builtins__['rooms'] = _rooms
+	__builtins__['users'] = _users
+
 lookup = {s.fileno():'#Server'}
 poller = epoll()
 poller.register(s.fileno(), EPOLLIN)
 
-parsers = {'api:gh' : gh_api, 'api:crispy' : crispy} ## == Examples, could be anything that will have the format `class protocol().parse(payload, headers, socket_fileno, socket_address)`
 
 while 1:
 	for fileno, eventID in poller.poll(10):
-		log('\nSock event:', translation_table[eventID] if eventID in translation_table else eventID, lookup[fileno] if fileno in lookup else fileno)
+		#log('\nSock event:', translation_table[eventID] if eventID in translation_table else eventID, lookup[fileno] if fileno in lookup else fileno, level=1)
 		if fileno == s.fileno():
 			ns, na = s.accept()
 			poller.register(ns.fileno(), EPOLLIN)
-			clients[ns.fileno()] = {'socket' : ws_client(ns, na, parsers), 'user' : None, 'domain' : None}
+			clients[ns.fileno()] = {'socket' : ws_client(ns, na), 'user' : None, 'domain' : None}
 			lookup[ns.fileno()] = na
 
 		elif fileno in clients:
 			if clients[fileno]['socket'].closed:
-				log('#Closing fileno:', fileno)
+				log('#Closing fileno:', fileno, level=1)
 				poller.unregister(fileno)
 				del clients[fileno]
 				del lookup[fileno]
 			else:
 				clients[fileno]['socket'].recv()
 		else:
-			log('Fileno not in clients?')
-
+			log('Fileno not in clients?', level=1)
 
