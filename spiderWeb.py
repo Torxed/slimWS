@@ -240,7 +240,10 @@ class ws_client():
 			self.sock.send(packet)
 
 	def recv(self, buf=8192):
-		self.data += self.sock.recv(buf)
+		try:
+			self.data += self.sock.recv(buf)
+		except ConnectionResetError:
+			self.data = '' # This will cause a reset two lines down.
 
 		if len(self.data) == 0:
 			log('[Socket disconnected]', level=2)
