@@ -9,7 +9,7 @@ from datetime import date, datetime
 #from helpers import *
 
 
-LEVEL = 2
+LEVEL = 3
 def log(*args, **kwargs):
 	if not 'level' in kwargs or kwargs['level'] >= LEVEL:
 		print(args, kwargs)
@@ -18,7 +18,7 @@ def json_serial(obj):
 	if isinstance(obj, (datetime, date)):
 		return obj.isoformat()
 
-	raise TypeError('Type {} is not serializable'.format(type(obj)))
+	raise TypeError('Type {} is not serializable: {}'.format(type(obj), obj))
 
 def list_to_dict(_list_):
 	# TODO: Verify that the length is dividable with 2.
@@ -111,6 +111,7 @@ class ws_packet():
 					self.data = b''
 					return
 				except Exception as e:
+					print('Could not JSON encode the data:')
 					print(e)
 
 				#log('<<', self.data, level=1)
@@ -130,6 +131,14 @@ class ws_packet():
 		self.carryOver = b''
 		return tmp
 
+class upgrader():
+	def __init__(self, parsers):
+		self.parsers = parsers
+
+	def upgrade(self, client, data):
+		client.keep_alive = True
+		return ws_client(client.socket, client.info['addr'], data, self.parsers)
+
 class ws_client():
 	def __init__(self, sock, addr, data=b'', parsers={}):
 		self.sock = sock
@@ -137,6 +146,10 @@ class ws_client():
 		self.state = 'HTTP'
 		self.data = data
 		self.closed = False
+		self.keep_alive = True
+		self.upgraded = False
+
+		self.init_headers = {}
 
 		#self.ws_packet = {'flags' : {'fin' : None, 'rsv1' : None, 'rsv2' : None, 'rsv3' : None, 'mask' : None},
 		#		'opcode' : None,
@@ -160,7 +173,7 @@ class ws_client():
 			headers[key.strip(b' \\;,.\r\n')] = val.strip(b' \\;,.\r\n')
 		return headers, payload
 
-	def parse(self):
+	def websock_parse(self):
 		## TODO: Large data streams could end up clogging the pipepine for other clients.
 		
 		while 1:
@@ -183,7 +196,7 @@ class ws_client():
 
 				## == Call all our parsers and yield any data they have.
 				for parser in self.parsers:
-					yield self.parsers[parser].protocol.parse(packet.data, self.headers, self.sock.fileno(), self.addr)
+					yield self.parsers[parser].protocol.parse(self, packet.data, self.headers, self.sock.fileno(), self.addr)
 
 			else:
 				## == Still waiting for more data to arrive.
@@ -239,18 +252,7 @@ class ws_client():
 			log('[Final::Data]:', packet, level=1)
 			self.sock.send(packet)
 
-	def recv(self, buf=8192):
-		try:
-			self.data += self.sock.recv(buf)
-		except ConnectionResetError:
-			self.data = '' # This will cause a reset two lines down.
-
-		if len(self.data) == 0:
-			log('[Socket disconnected]', level=2)
-			self.sock.close()
-			self.closed = True
-			return
-
+	def parse(self):
 		if b'\r\n\r\n' in self.data and self.state == 'HTTP':
 			self.headers, self.payload = self.http_parse(self.data)
 			#log(self.headers, level=1)
@@ -260,6 +262,7 @@ class ws_client():
 			  b'Upgrade' in self.headers and b'Connection' in self.headers and \
 			  self.headers[b'Upgrade'].lower() == b'websocket' and \
 			  b'upgrade' in self.headers[b'Connection'].lower():
+				self.init_headers = self.headers.copy()
 				magic_key = self.headers[b'Sec-WebSocket-Key'] + b'258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
 				hash = sha1(magic_key).digest()
 
@@ -270,7 +273,7 @@ class ws_client():
 				resp += b'Sec-WebSocket-Accept: ' + b64encode(hash) + b'\r\n'
 				resp += b'\r\n'
 
-				log('[Connection upgraded]', level=1)
+				#log('[Connection upgraded]', level=1)
 				self.data = b''
 				#self.ws_index = 0
 				self.state = 'WEBSOCK'
@@ -285,21 +288,40 @@ class ws_client():
 				return
 
 		elif self.state == 'WEBSOCK':
-			for data in self.parse():
+			for data in self.websock_parse():
 				if data is None: continue
 
 				log('>>', data, level=1)
 				self.ws_send(data)
+		else:
+			log('!!', 'Missing data/headers:', data)
+
+	def recv(self, buf=8192):
+		self.data += self.sock.recv(buf)
+
+		if len(self.data) == 0:
+			log('[Socket disconnected]', level=2)
+			self.sock.close()
+			self.closed = True
+			return
+
+		#self.parse()
+
+	def close(self):
+		self.sock.close()
+		self.closed = True
+		self.keep_alive = False
+
 
 class server():
 	#x = ws_client(None, None, b'\x81\xfe\x00\xd2\xa9\xbc\xc6\n\xd2\x9e\xb5o\xd8\xc9\xa3d\xca\xd9\x99d\xdb\x9e\xfc(\x9f\xd9\xa5>\x9a\xd8\xa7>\x98\x85\xa5n\xcc\xda\xf1<\xcc\xda\xfe2\x9d\x8d\xa4o\xca\x8f\xf1?\x99\x88\xf2i\xcb\x84\xf3=\x9a\x8e\xf79\x9a\x8c\xf0h\x9e\x85\xf0;\xcc\x84\xa4k\x90\xdd\xf6n\x99\x8c\xa79\xcc\x85\xf0i\x8b\x90\xe4e\xd9\xd9\xb4k\xdd\xd5\xa9d\x8b\x86\xe4{\xdc\xd9\xb4s\x8b\x90\xe4e\xcb\xd6\xa3i\xdd\x9e\xfc(\x84\x91\xa7f\xc5\xcc\xaak\xd0\xd9\xb4y\x84\x91\xe4&\x8b\xdd\xa5i\xcc\xcf\xb5U\xdd\xd3\xado\xc7\x9e\xfc(\xc8\x8b\xf6<\xca\xdf\xa52\x99\x8c\xf6k\xcf\x8c\xfe9\xca\x8d\xa29\xcf\x85\xf48\xcf\xd9\xa2i\x9b\x89\xa0n\x9e\x8f\xf2l\x9e\x8b\xa3?\x9b\x85\xf62\x9f\xd9\xf6l\xcf\x8c\xff=\x91\x88\xa7l\x9a\x8d\xf6l\x9c\x8d\xa2h\x8b\xc1\x81\xfe\x01\'\x90\n\x96i\xeb(\xe5\x0c\xe1\x7f\xf3\x07\xf3o\xc9\x07\xe2(\xacK\xa6o\xf5]\xa3n\xf7]\xa13\xf5\r\xf5l\xa1_\xf5l\xaeQ\xa4;\xf4\x0c\xf39\xa1\\\xa0>\xa2\n\xf22\xa3^\xa38\xa7Z\xa3:\xa0\x0b\xa73\xa0X\xf52\xf4\x08\xa9k\xa6\r\xa0:\xf7Z\xf53\xa0\n\xb2&\xb4\x06\xe0o\xe4\x08\xe4c\xf9\x07\xb20\xb4\x18\xe5o\xe4\x10\xb2&\xb4\x06\xf2`\xf3\n\xe4(\xacK\xf3b\xf7\x1d\xb2&\xb4\x08\xe3y\xf3\x1d\xb20\xb4\x1b\xffe\xfb6\xfcc\xe5\x1d\xb2&\xb4\x06\xe7d\xf3\x1b\xb20\xb4\n\xa1k\xf3Z\xa72\xf0\x08\xf39\xa0X\xa0k\xf0X\xf6o\xa7Q\xf4;\xa6Z\xa82\xaf[\xf32\xa1]\xf5?\xa6]\xa7i\xf7\x0f\xa9k\xa3Z\xa3:\xae[\xf6i\xa3]\xa2h\xa4\x0c\xa28\xf7^\xa08\xa5K\xbc(\xf7\n\xf3o\xe5\x1a\xcf~\xf9\x02\xf5d\xb4S\xb2k\xa1Y\xa6i\xf5\n\xa8:\xa6Y\xf1l\xa6Q\xa3i\xa7\r\xa3l\xaf[\xa2l\xf3\r\xf38\xa3\x0f\xf4=\xa5]\xf6=\xa1\x0c\xa58\xafY\xa8<\xf3Y\xf6l\xa6P\xa72\xa2\x08\xf69\xa7Y\xf6?\xa7\r\xf2(\xeb\x81\xfe\x01*7\x11Z\xeeL3)\x8bFd?\x80Tt\x05\x80E3`\xcc\x01t9\xda\x04u;\xda\x06(9\x8aRwm\xd8Rwb\xd6\x03 8\x8bT"m\xdb\x07%n\x8dU)o\xd9\x04#k\xdd\x04!l\x8c\x00(l\xdfR)8\x8f\x0epj\x8a\x07!;\xddR(l\x8d\x15=x\x81Gt(\x8fCx5\x80\x15+x\x9fBt(\x97\x15=x\x81U{?\x8dC3`\xccCt;\x83Gc5\x88^}?\x9d\x15=x\x8fDb?\x9a\x15+x\x9eBs=\xcc\x1b3;\x8dTt)\x9dhe5\x85R\x7fx\xd4\x15pm\xde\x01r9\x8d\x0f!j\xdeVwj\xd6\x04rk\x8a\x04wc\xdc\x05w?\x8aT#o\x88S&i\xdaQ&m\x8b\x02#c\xde\x0f\'?\xdeQwj\xd7\x00)n\x8fQ"k\xdeQ$k\x8aU3v\xccXf4\x8bE3`\xccT ;\x8b\x04&b\x88Vri\xd8\x06!;\x88\x06w?\xdf\x0fuk\xde\x04)b\xd7\x05rb\xd9\x03to\xde\x03&9\x8fQ(;\xdb\x04"j\xd6\x05w9\xdb\x03#8\xdcR#h\x8f\x00!h\xdd\x15l')
 	#x.parse()
 	#exit(1)
-	def __init__(self, parsers):
+	def __init__(self, parsers, port=1337):
 		self.s = socket()
 		self.s.setsockopt(SOL_SOCKET, SO_REUSEADDR, 1)
 
-		self.s.bind(('', 1337))
+		self.s.bind(('127.0.0.1', port))
 		self.s.listen(4)
 
 		lookup = {self.s.fileno():'#Server'}
