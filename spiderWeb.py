@@ -6,13 +6,16 @@ from select import epoll, EPOLLIN
 from struct import pack, unpack
 from datetime import date, datetime
 
-#from helpers import *
-
-
-LEVEL = 3
-def log(*args, **kwargs):
-	if not 'level' in kwargs or kwargs['level'] >= LEVEL:
-		print(args, kwargs)
+if not 'log' in __builtins__ or ('__dict__' in __builtins__ and not 'log' in __builtins__.__dict__):
+	LEVEL = 2
+	def _log(*args, **kwargs):
+		if not 'level' in kwargs or kwargs['level'] <= LEVEL:
+			## TODO: Try journald first, print as backup
+			print(args, kwargs)
+	try:
+		__builtins__.__dict__['log'] = _log
+	except:
+		__builtins__['log'] = _log
 
 def json_serial(obj):
 	if isinstance(obj, (datetime, date)):
@@ -41,8 +44,8 @@ class ws_packet():
 		self.mask_key = None
 		self.data = b''
 		self.carryOver = b''
-		log('Flags:', self.flags, level=1)
-		log('OpCode:', self.opcode, level=1)
+		log('Flags:', self.flags, level=5)
+		log('OpCode:', self.opcode, level=5)
 		
 		## == We skip the first 0 index because data[index 0] is the [fin,rsv1,rsv2,rsv3,opcode] byte.
 		self.data_index = 1
@@ -69,37 +72,37 @@ class ws_packet():
 
 			## == CONDITION 1: The length is less than 126 - Which means whatever length this is, is the actual payload length.
 			if self.payload_len < 126:
-				log('Len:', self.payload_len, level=1)
+				log('Len:', self.payload_len, level=5)
 
 			## == CONDITION 2: Length is 126, which means the next [2 bytes] are the length.
 			elif self.payload_len == 126 and len(data) >= self.data_index+2:
 				self.payload_len = unpack('>H', data[self.data_index:self.data_index+2])[0]
 				self.data_index += 2
-				log('Large payload:', self.payload_len, level=1)
+				log('Large payload:', self.payload_len, level=5)
 
 			## == Condition 3: Length is 127, which means the next [8] bytes are the length.
 			elif self.payload_len == 127 and len(data) >= self.data_index+2:
 				self.payload_len = unpack('>Q', data[self.data_index:self.data_index+8])[0]
 				self.data_index += 2
-				log('Huge payload:', self.payload_len, level=1)
+				log('Huge payload:', self.payload_len, level=5)
 
 			## == We try to see if the package is XOR:ed (mask=True) and data length is larger than 4.
 			if self.flags['mask'] and len(data) >= self.data_index+4:
 				#mask_key = unpack('I', ws[parsed_index:parsed_index+4])[0]
 				self.mask_key = data[self.data_index:self.data_index+4]
-				log('Mask key:', self.mask_key, level=1)
+				log('Mask key:', self.mask_key, level=5)
 				self.data_index += 4
 
 			if self.flags['mask']:
 				self.data = b''
-				log('[XOR::Data]:', data[self.data_index:self.data_index+self.payload_len], level=1)
+				log('[XOR::Data]:', data[self.data_index:self.data_index+self.payload_len], level=5)
 				for index, c in enumerate(data[self.data_index:self.data_index+self.payload_len]):
 					self.data += bytes([c ^ self.mask_key[(index%4)]])
 
 				## == carry over the remainer.
 				self.carryOver = data[self.data_index+self.payload_len:]
 
-				log('[   ::Data]:', self.data, level=2)
+				log('[   ::Data]:', self.data, level=5)
 				if self.data == b'PING':
 					self.data = b''
 					return
@@ -107,17 +110,17 @@ class ws_packet():
 				try:
 					self.data = loads(self.data.decode('UTF-8'))
 				except UnicodeDecodeError:
-					log('[ERROR] UnicodeDecodeError:', self.data, level=1)
+					log('[ERROR] UnicodeDecodeError:', self.data, level=2)
 					self.data = b''
 					return
 				except Exception as e:
-					print('Could not JSON encode the data:')
-					print(e)
+					log('spiderWeb', 'ws_packet', 'Could not JSON encode the data:', level=3)
+					log('spiderWeb', 'ws_packet', e, level=3)
 
-				#log('<<', self.data, level=1)
+				#log('<<', self.data, level=5)
 				# retData = self.parsers[parser].protocol.parse(data, self.headers, self.sock.fileno(), self.addr)
 				# if retData:
-				# 	log('>>', retData, level=1)
+				# 	log('>>', retData, level=5)
 				# 	self.ws_send(retData)
 
 	def __enter__(self):
@@ -135,9 +138,25 @@ class upgrader():
 	def __init__(self, parsers):
 		self.parsers = parsers
 
-	def upgrade(self, client, data):
+	def upgrade(self, client, headers, data):
 		client.keep_alive = True
-		return ws_client(client.socket, client.info['addr'], data, self.parsers)
+
+		init_headers = headers.copy()
+		magic_key = headers[b'sec-websocket-key'] + b'258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
+		hash = sha1(magic_key).digest()
+
+		resp = b''
+		resp += b'HTTP/1.1 101 Switching protocols\r\n'
+		resp += b'Upgrade: websocket\r\n'
+		resp += b'Connection: Upgrade\r\n'
+		resp += b'Sec-WebSocket-Accept: ' + b64encode(hash) + b'\r\n'
+		resp += b'\r\n'
+
+		client.send(resp)
+
+		c = ws_client(client.socket, client.info['addr'], data, self.parsers)
+		c.state = 'WEBSOCK'
+		return c
 
 class ws_client():
 	def __init__(self, sock, addr, data=b'', parsers={}):
@@ -180,7 +199,7 @@ class ws_client():
 			if len(self.data) <= 0:
 				break # No more data here
 
-			log('\n[Parsing packet]:', self.data, level=1)
+			log('\n[Parsing packet]:', self.data, level=5)
 			## == Set up a ws_packet() based on all the data the client has sent us.
 			packet = ws_packet(self.data)
 
@@ -196,14 +215,17 @@ class ws_client():
 
 				## == Call all our parsers and yield any data they have.
 				for parser in self.parsers:
-					yield self.parsers[parser].protocol.parse(self, packet.data, self.headers, self.sock.fileno(), self.addr)
+					yield self.parsers[parser].parse(self, packet.data, self.headers, self.sock.fileno(), self.addr)
 
 			else:
 				## == Still waiting for more data to arrive.
 				break
 
+	def send(self, data, *args, **kwargs):
+		self.ws_send(data, *args, **kwargs)
+
 	def ws_send(self, data, SPLIT=False):
-		log('\n[Structuring a packet]', level=1)
+		log('\n[Structuring a packet]', level=5)
 
 		if type(data) == dict:
 			data = dumps(data, default=json_serial)
@@ -218,7 +240,7 @@ class ws_client():
 			## Add the flags + opcode (0 == continuation frame, 1 == text, 2 == binary, 8 == con close, 9 == ping, A == pong)
 			last_segment = True if index == len(data)-1 else False
 			fin, rsv1, rsv2, rsv3, opcode = (b'1' if last_segment else b'0'), b'0', b'0', b'0', bytes('{:0>4}'.format('1' if last_segment else '0'), 'UTF-8') # .... (....)
-			#log(b''.join([fin, rsv1, rsv2, rsv3, opcode]).decode('UTF-8'), level=1)
+			#log(b''.join([fin, rsv1, rsv2, rsv3, opcode]).decode('UTF-8'), level=5)
 			packet += pack('B', int(b''.join([fin, rsv1, rsv2, rsv3, opcode]), 2))
 
 			mask = b'0'
@@ -237,26 +259,26 @@ class ws_client():
 
 			elif payload_len >= 126: # 2 bytes INT
 				extended_len = pack('!H', payload_len)
-				log(b''.join([mask, bytes('{0:0>7b}'.format(126), 'UTF-8')]), level=1)
+				log(b''.join([mask, bytes('{0:0>7b}'.format(126), 'UTF-8')]), level=5)
 				payload_len = pack('B', int(b''.join([mask, bytes('{0:0>7b}'.format(126), 'UTF-8')]),2))
 			else:
 				extended_len = b''
-				#log(b''.join([mask, bytes('{0:0>7b}'.format(payload_len), 'UTF-8')]).decode('UTF-8'), end=' ', level=1)
+				#log(b''.join([mask, bytes('{0:0>7b}'.format(payload_len), 'UTF-8')]).decode('UTF-8'), end=' ', level=5)
 				payload_len = pack('B', int(b''.join([mask, bytes('{0:0>7b}'.format(payload_len), 'UTF-8')]),2))
 
 			# Payload len is padded with mask
 			packet += payload_len + extended_len + mask_key + segment
-			log('[Flags::Data]:', {'fin': fin, 'rsv1': rsv1, 'rsv2': rsv2, 'rsv3': rsv3, 'mask': True if mask == b'1' else False, 'OpCode':opcode, 'len' : len(segment), 'mask_key' : mask_key}, segment, level=1)
+			log('[Flags::Data]:', {'fin': fin, 'rsv1': rsv1, 'rsv2': rsv2, 'rsv3': rsv3, 'mask': True if mask == b'1' else False, 'OpCode':opcode, 'len' : len(segment), 'mask_key' : mask_key}, segment, level=5)
 
 			#log(data.decode('UTF-8'))
-			log('[Final::Data]:', packet, level=1)
+			log('[Final::Data]:', packet, level=5)
 			self.sock.send(packet)
 
 	def parse(self):
 		if b'\r\n\r\n' in self.data and self.state == 'HTTP':
 			self.headers, self.payload = self.http_parse(self.data)
-			#log(self.headers, level=1)
-			#log(self.payload, level=1)
+			#log(self.headers, level=5)
+			#log(self.payload, level=5)
 
 			if b'Sec-WebSocket-Key' in self.headers and \
 			  b'Upgrade' in self.headers and b'Connection' in self.headers and \
@@ -273,7 +295,7 @@ class ws_client():
 				resp += b'Sec-WebSocket-Accept: ' + b64encode(hash) + b'\r\n'
 				resp += b'\r\n'
 
-				#log('[Connection upgraded]', level=1)
+				#log('[Connection upgraded]', level=5)
 				self.data = b''
 				#self.ws_index = 0
 				self.state = 'WEBSOCK'
@@ -291,20 +313,26 @@ class ws_client():
 			for data in self.websock_parse():
 				if data is None: continue
 
-				log('>>', data, level=1)
+				log('>>', data, level=5)
 				self.ws_send(data)
 		else:
 			log('!!', 'Missing data/headers:', data)
 
 	def recv(self, buf=8192):
-		self.data += self.sock.recv(buf)
+		try:
+			self.data += self.sock.recv(buf)
+		except:
+			print('Critical error! Fix! :P')
+			exit(1)
 
 		if len(self.data) == 0:
-			log('[Socket disconnected]', level=2)
+			log('[Socket disconnected]', level=5)
 			self.sock.close()
 			self.closed = True
+			self.data = b''
 			return
 
+		return len(self.data)
 		#self.parse()
 
 	def close(self):
@@ -337,8 +365,8 @@ class server():
 			__builtins__['io'] = {}
 
 		while 1:
-			for fileno, eventID in poller.poll(10):
-				#log('\nSock event:', translation_table[eventID] if eventID in translation_table else eventID, lookup[fileno] if fileno in lookup else fileno, level=1)
+			for fileno, eventID in poller.poll(0.025):
+				#log('\nSock event:', translation_table[eventID] if eventID in translation_table else eventID, lookup[fileno] if fileno in lookup else fileno, level=5)
 				if fileno == self.s.fileno():
 					ns, na = self.s.accept()
 					poller.register(ns.fileno(), EPOLLIN)
@@ -347,12 +375,12 @@ class server():
 
 				elif fileno in clients:
 					if clients[fileno]['socket'].closed:
-						log('#Closing fileno:', fileno, level=1)
+						log('#Closing fileno:', fileno, level=5)
 						poller.unregister(fileno)
 						del clients[fileno]
 						del lookup[fileno]
 					else:
 						clients[fileno]['socket'].recv()
 				else:
-					log('Fileno not in clients?', level=1)
+					log('Fileno not in clients?', level=5)
 
