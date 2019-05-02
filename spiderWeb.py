@@ -404,7 +404,7 @@ class server():
 			__builtins__['io'] = {}
 
 		while 1:
-			for fileno, eventID in poller.poll(0.025):
+			for fileno, eventID in poller.poll(0.001):
 				#log('\nSock event:', translation_table[eventID] if eventID in translation_table else eventID, lookup[fileno] if fileno in lookup else fileno, level=5)
 				if fileno == self.s.fileno():
 					ns, na = self.s.accept()
