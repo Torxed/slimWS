@@ -55,8 +55,8 @@ class ws_packet():
 		self.mask_key = None
 		self.data = b''
 		self.carryOver = b''
-		log('Flags:', self.flags, level=10)
-		log('OpCode:', self.opcode, level=10)
+		log('Flags:', self.flags, level=10, origin='spiderWeb', function='ws_packet')
+		log('OpCode:', self.opcode, level=10, origin='spiderWeb', function='ws_packet')
 		
 		## == We skip the first 0 index because data[index 0] is the [fin,rsv1,rsv2,rsv3,opcode] byte.
 		self.data_index = 1
@@ -83,37 +83,37 @@ class ws_packet():
 
 			## == CONDITION 1: The length is less than 126 - Which means whatever length this is, is the actual payload length.
 			if self.payload_len < 126:
-				log('Len:', self.payload_len, level=10)
+				log('Len:', self.payload_len, level=10, origin='spiderWeb', function='ws_packet')
 
 			## == CONDITION 2: Length is 126, which means the next [2 bytes] are the length.
 			elif self.payload_len == 126 and len(data) >= self.data_index+2:
 				self.payload_len = unpack('>H', data[self.data_index:self.data_index+2])[0]
 				self.data_index += 2
-				log('Large payload:', self.payload_len, level=10)
+				log('Large payload:', self.payload_len, level=10, origin='spiderWeb', function='ws_packet')
 
 			## == Condition 3: Length is 127, which means the next [8] bytes are the length.
 			elif self.payload_len == 127 and len(data) >= self.data_index+2:
 				self.payload_len = unpack('>Q', data[self.data_index:self.data_index+8])[0]
 				self.data_index += 8
-				log('Huge payload:', self.payload_len, level=10)
+				log('Huge payload:', self.payload_len, level=10, origin='spiderWeb', function='ws_packet')
 
 			## == We try to see if the package is XOR:ed (mask=True) and data length is larger than 4.
 			if self.flags['mask'] and len(data) >= self.data_index+4:
 				#mask_key = unpack('I', ws[parsed_index:parsed_index+4])[0]
 				self.mask_key = data[self.data_index:self.data_index+4]
-				log('Mask key:', self.mask_key, level=10)
+				log('Mask key:', self.mask_key, level=10, origin='spiderWeb', function='ws_packet')
 				self.data_index += 4
 
 			if self.flags['mask']:
 				self.data = b''
-				log('[XOR::Data]:', data[self.data_index:self.data_index+self.payload_len], level=10)
+				log('[XOR::Data]:', data[self.data_index:self.data_index+self.payload_len], level=10, origin='spiderWeb', function='ws_packet')
 				for index, c in enumerate(data[self.data_index:self.data_index+self.payload_len]):
 					self.data += bytes([c ^ self.mask_key[(index%4)]])
 
 				## == carry over the remainer.
 				self.carryOver = data[self.data_index+self.payload_len:]
 
-				log('[   ::Data]:', self.data, level=9)
+				log('[   ::Data]:', self.data, level=9, origin='spiderWeb', function='ws_packet')
 				if self.data == b'PING':
 					self.data = b''
 					return
@@ -139,18 +139,18 @@ class ws_packet():
 					try:
 						self.data = loads(self.data.decode('UTF-8'))
 					except UnicodeDecodeError:
-						log('[ERROR] UnicodeDecodeError:', self.data, level=2)
+						log('[ERROR] UnicodeDecodeError:', self.data, level=2, origin='spiderWeb', function='ws_packet')
 						self.data = b''
 						return
 					except Exception as e:
-						log('spiderWeb', 'ws_packet', 'Could not JSON encode the data:', level=3)
-						log('spiderWeb', 'ws_packet', e, level=3)
+						log('Could not JSON encode the data:', level=3, origin='spiderWeb', function='ws_packet')
+						log(e, level=3)
 						raise ValueError("Could not parse the data as JSON.\n{}".format(self.data[:100]), e)
 
-				#log('<<', self.data, level=5)
+				#log('<<', self.data, level=5, origin='spiderWeb', function='ws_packet')
 				# retData = self.parsers[parser].protocol.parse(data, self.headers, self.sock.fileno(), self.addr)
 				# if retData:
-				# 	log('>>', retData, level=5)
+				# 	log('>>', retData, level=5, origin='spiderWeb', function='ws_packet')
 				# 	self.ws_send(retData)
 
 	def __enter__(self):
@@ -231,12 +231,12 @@ class ws_client():
 				break # No more data here
 
 			loop += 1
-			log('\n[Parsing packet]:', self.data[:100], level=10)
+			log('\n[Parsing packet]:', self.data[:100], level=10, origin='spiderWeb', function='websock_parse')
 			try:
 				## == Set up a ws_packet() based on all the data the client has sent us.
 				packet = ws_packet(self.data)
 			except PacketIncomplete as e:
-				log('spiderWeb', 'websock_parse', 'PacketIncomplete() was raised. retrying recv() (might block everything)', level=2)
+				log('PacketIncomplete() was raised. retrying recv() (might block everything)', level=2, origin='spiderWeb', function='websock_parse')
 				self.recv()
 				for response in self.websock_parse():
 					yield response
@@ -265,7 +265,7 @@ class ws_client():
 		self.ws_send(data, *args, **kwargs)
 
 	def ws_send(self, data, SPLIT=False):
-		log('\n[Structuring a packet]', level=5)
+		log('[Structuring a packet]', level=5, origin='spiderWeb', function='ws_send')
 
 		if type(data) == dict:
 			data = dumps(data, default=json_serial)
@@ -280,7 +280,7 @@ class ws_client():
 			## Add the flags + opcode (0 == continuation frame, 1 == text, 2 == binary, 8 == con close, 9 == ping, A == pong)
 			last_segment = True if index == len(data)-1 else False
 			fin, rsv1, rsv2, rsv3, opcode = (b'1' if last_segment else b'0'), b'0', b'0', b'0', bytes('{:0>4}'.format('1' if last_segment else '0'), 'UTF-8') # .... (....)
-			#log(b''.join([fin, rsv1, rsv2, rsv3, opcode]).decode('UTF-8'), level=5)
+			#log(b''.join([fin, rsv1, rsv2, rsv3, opcode]).decode('UTF-8'), level=5, origin='spiderWeb', function='ws_send')
 			packet += pack('B', int(b''.join([fin, rsv1, rsv2, rsv3, opcode]), 2))
 
 			mask = b'0'
@@ -299,26 +299,26 @@ class ws_client():
 
 			elif payload_len >= 126: # 2 bytes INT
 				extended_len = pack('!H', payload_len)
-				log(b''.join([mask, bytes('{0:0>7b}'.format(126), 'UTF-8')]), level=5)
+				log(b''.join([mask, bytes('{0:0>7b}'.format(126), 'UTF-8')]), level=5, origin='spiderWeb', function='ws_send')
 				payload_len = pack('B', int(b''.join([mask, bytes('{0:0>7b}'.format(126), 'UTF-8')]),2))
 			else:
 				extended_len = b''
-				#log(b''.join([mask, bytes('{0:0>7b}'.format(payload_len), 'UTF-8')]).decode('UTF-8'), end=' ', level=5)
+				#log(b''.join([mask, bytes('{0:0>7b}'.format(payload_len), 'UTF-8')]).decode('UTF-8'), end=' ', level=5, origin='spiderWeb', function='ws_send')
 				payload_len = pack('B', int(b''.join([mask, bytes('{0:0>7b}'.format(payload_len), 'UTF-8')]),2))
 
 			# Payload len is padded with mask
 			packet += payload_len + extended_len + mask_key + segment
-			log('[Flags::Data]:', {'fin': fin, 'rsv1': rsv1, 'rsv2': rsv2, 'rsv3': rsv3, 'mask': True if mask == b'1' else False, 'OpCode':opcode, 'len' : len(segment), 'mask_key' : mask_key}, segment, level=10)
+			log('[Flags::Data]:', {'fin': fin, 'rsv1': rsv1, 'rsv2': rsv2, 'rsv3': rsv3, 'mask': True if mask == b'1' else False, 'OpCode':opcode, 'len' : len(segment), 'mask_key' : mask_key}, segment, level=10, origin='spiderWeb', function='ws_send')
 
-			#log(data.decode('UTF-8'))
-			log('[Final::Data]:', packet, level=10)
+			#log(data.decode('UTF-8'), origin='spiderWeb', function='ws_send')
+			log('[Final::Data]:', packet, level=10, origin='spiderWeb', function='ws_send')
 			self.sock.send(packet)
 
 	def parse(self):
 		if b'\r\n\r\n' in self.data and self.state == 'HTTP':
 			self.headers, self.payload = self.http_parse(self.data)
-			#log(self.headers, level=5)
-			#log(self.payload, level=5)
+			#log(self.headers, level=5, origin='spiderWeb', function='ws_send')
+			#log(self.payload, level=5, origin='spiderWeb', function='ws_send')
 
 			if b'Sec-WebSocket-Key' in self.headers and \
 			  b'Upgrade' in self.headers and b'Connection' in self.headers and \
@@ -335,7 +335,7 @@ class ws_client():
 				resp += b'Sec-WebSocket-Accept: ' + b64encode(hash) + b'\r\n'
 				resp += b'\r\n'
 
-				#log('[Connection upgraded]', level=5)
+				#log('[Connection upgraded]', level=5, origin='spiderWeb', function='ws_send')
 				self.data = b''
 				#self.ws_index = 0
 				self.state = 'WEBSOCK'
@@ -353,10 +353,10 @@ class ws_client():
 			for data in self.websock_parse():
 				if data is None: continue
 
-				log('>>', data, level=5)
+				log('>>', data, level=5, origin='spiderWeb', function='ws_send')
 				self.ws_send(data)
 		else:
-			log('!!', 'Missing data/headers:', data)
+			log('!!', 'Missing data/headers:', data, origin='spiderWeb', function='ws_send')
 
 	def recv(self, buf=8192):
 		try:
@@ -366,7 +366,7 @@ class ws_client():
 			exit(1)
 
 		if len(self.data) == 0:
-			log('[Socket disconnected]', level=5)
+			log('[Socket disconnected]', level=5, origin='spiderWeb', function='ws_send')
 			self.sock.close()
 			self.closed = True
 			self.data = b''
@@ -405,7 +405,7 @@ class server():
 
 		while 1:
 			for fileno, eventID in poller.poll(0.001):
-				#log('\nSock event:', translation_table[eventID] if eventID in translation_table else eventID, lookup[fileno] if fileno in lookup else fileno, level=5)
+				#log('\nSock event:', translation_table[eventID] if eventID in translation_table else eventID, lookup[fileno] if fileno in lookup else fileno, level=5, origin='spiderWeb', function='ws_send')
 				if fileno == self.s.fileno():
 					ns, na = self.s.accept()
 					poller.register(ns.fileno(), EPOLLIN)
@@ -414,12 +414,12 @@ class server():
 
 				elif fileno in clients:
 					if clients[fileno]['socket'].closed:
-						log('#Closing fileno:', fileno, level=5)
+						log('#Closing fileno:', fileno, level=5, origin='spiderWeb', function='ws_send')
 						poller.unregister(fileno)
 						del clients[fileno]
 						del lookup[fileno]
 					else:
 						clients[fileno]['socket'].recv()
 				else:
-					log('Fileno not in clients?', level=5)
+					log('Fileno not in clients?', level=5, origin='spiderWeb', function='ws_send')
 
