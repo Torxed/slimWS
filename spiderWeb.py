@@ -234,7 +234,7 @@ class ws_client():
 				break # No more data here
 
 			loop += 1
-			log('\n[Parsing packet]:', self.data[:100], level=10, origin='spiderWeb', function='websock_parse')
+			log('[Parsing packet]:', self.data[:100], level=10, origin='spiderWeb', function='websock_parse')
 			try:
 				## == Set up a ws_packet() based on all the data the client has sent us.
 				packet = ws_packet(self.data)
