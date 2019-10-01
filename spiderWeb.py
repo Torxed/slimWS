@@ -302,7 +302,7 @@ class ws_client():
 
 			elif payload_len >= 126: # 2 bytes INT
 				extended_len = pack('!H', payload_len)
-				log(b''.join([mask, bytes('{0:0>7b}'.format(126), 'UTF-8')]), level=5, origin='spiderWeb', function='ws_send')
+				log(b'[Mask]:'.join([mask, bytes('{0:0>7b}'.format(126), 'UTF-8')]), level=5, origin='spiderWeb', function='ws_send')
 				payload_len = pack('B', int(b''.join([mask, bytes('{0:0>7b}'.format(126), 'UTF-8')]),2))
 			else:
 				extended_len = b''
