@@ -31,6 +31,8 @@ class PacketIncomplete(Exception):
 def json_serial(obj):
 	if isinstance(obj, (datetime, date)):
 		return obj.isoformat()
+	if type(obj) is bytes:
+		return obj.decode('UTF-8')
 
 	raise TypeError('Type {} is not serializable: {}'.format(type(obj), obj))
 
