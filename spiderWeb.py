@@ -425,6 +425,7 @@ class server():
 						del lookup[fileno]
 					else:
 						clients[fileno]['socket'].recv()
+						clients[fileno]['socket'].parse()
 				else:
 					log('Fileno not in clients?', level=5, origin='spiderWeb', function='ws_send')
 
