@@ -6,10 +6,15 @@ from select import epoll, EPOLLIN
 from struct import pack, unpack
 from datetime import date, datetime
 
+try:
+	if not 'LEVEL' in __builtins__.__dict__: __builtins__.__dict__['LEVEL'] = 1
+except:
+	if not 'LEVEL' in __builtins__: __builtins__['LEVEL'] = 1
+
 #ifdef !log (Yea I know, this should be a 'from main import log' or at least a try/catch)
 if not 'log' in __builtins__ or ('__dict__' in __builtins__ and not 'log' in __builtins__.__dict__):
 	def _log(*args, **kwargs):
-		if not 'level' in kwargs or kwargs['level'] <= LEVEL:
+		if not 'level' in kwargs or kwargs['level'] >= LEVEL:
 			## TODO: Try journald first, print as backup
 			print(args, kwargs)
 			#with open('debug.log', 'a') as output:
