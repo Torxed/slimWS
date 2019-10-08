@@ -8,7 +8,7 @@ from spiderWeb import spiderWeb
 
 class parser():
 	def parse(self, client, data, headers, fileno, addr, *args, **kwargs):
-		print(data)
+		yield {'status' : 'successful'}
 
 server = spiderWeb.server({'default' : parser()}, address='', port=4001)
 ```
