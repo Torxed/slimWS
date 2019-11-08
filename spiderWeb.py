@@ -1,3 +1,4 @@
+import types
 from socket import *
 from base64 import b64encode
 from hashlib import sha1
@@ -13,12 +14,32 @@ except:
 
 #ifdef !log (Yea I know, this should be a 'from main import log' or at least a try/catch)
 if not 'log' in __builtins__ or ('__dict__' in __builtins__ and not 'log' in __builtins__.__dict__):
-	def _log(*args, **kwargs):
-		if not 'level' in kwargs or kwargs['level'] >= LEVEL:
-			## TODO: Try journald first, print as backup
-			print(args, kwargs)
-			#with open('debug.log', 'a') as output:
-			#	output.write('{}, {}\n'.format(args, kwargs))
+	import logging
+	from systemd.journal import JournalHandler
+	logger = logging.getLogger() # __name__
+	journald_handler = JournalHandler()
+	journald_handler.setFormatter(logging.Formatter('[{levelname}] {message}', style='{'))
+	logger.addHandler(journald_handler)
+	logger.setLevel(logging.DEBUG)
+	LOG_LEVEL = 4
+	class CustomAdapter(logging.LoggerAdapter):
+		def process(self, msg, kwargs):
+			return '[{}] {}'.format(self.extra['origin'], msg), kwargs
+	def _log(*msg, origin='UNKNOWN', level=5, **kwargs):
+		if level <= LOG_LEVEL:
+			msg = [item.decode('UTF-8', errors='backslashreplace') if type(item) == bytes else item for item in msg]
+			msg = [str(item) if type(item) != str else item for item in msg]
+			log_adapter = CustomAdapter(logger, {'origin': origin})
+			if level <= 1:
+				log_adapter.critical(' '.join(msg))
+			elif level <= 2:
+				log_adapter.error(' '.join(msg))
+			elif level <= 3:
+				log_adapter.warning(' '.join(msg))
+			elif level <= 4:
+				log_adapter.info(' '.join(msg))
+			else:
+				log_adapter.debug(' '.join(msg))
 	try:
 		__builtins__.__dict__['log'] = _log
 	except:
@@ -264,8 +285,12 @@ class ws_client():
 
 				## == Call all our parsers and yield any data they have.
 				for parser in self.parsers:
-					for response in self.parsers[parser].parse(self, packet.data, self.headers, self.sock.fileno(), self.addr):
-						yield response
+					handle = self.parsers[parser].parse(self, packet.data, self.headers, self.sock.fileno(), self.addr)
+					if isinstance(handle, types.GeneratorType):
+						for response in handle:
+							yield response
+					else:
+						yield handle
 
 			else:
 				## == Still waiting for more data to arrive.
@@ -406,12 +431,13 @@ class server():
 		poller.register(self.s.fileno(), EPOLLIN)
 		self.parsers = parsers
 
-		try:
-			__builtins__.__dict__['clients'] = {}
-			__builtins__.__dict__['io'] = {}
-		except:
-			__builtins__['clients'] = {}
-			__builtins__['io'] = {}
+		if not 'sockets' in __builtins__ or ('__dict__' in __builtins__ and not 'sockets' in __builtins__.__dict__):
+			try:
+				__builtins__.__dict__['sockets'] = {}
+				__builtins__.__dict__['io'] = {}
+			except:
+				__builtins__['sockets'] = {}
+				__builtins__['io'] = {}
 
 		while 1:
 			for fileno, eventID in poller.poll(0.001):
@@ -419,18 +445,18 @@ class server():
 				if fileno == self.s.fileno():
 					ns, na = self.s.accept()
 					poller.register(ns.fileno(), EPOLLIN)
-					clients[ns.fileno()] = {'socket' : ws_client(ns, na, parsers=self.parsers), 'user' : None, 'domain' : None}
+					sockets[ns.fileno()] = {'socket' : ws_client(ns, na, parsers=self.parsers), 'user' : None, 'domain' : None}
 					lookup[ns.fileno()] = na
 
-				elif fileno in clients:
-					if clients[fileno]['socket'].closed:
+				elif fileno in sockets:
+					if sockets[fileno]['socket'].closed:
 						log('#Closing fileno:', fileno, level=5, origin='spiderWeb', function='ws_send')
 						poller.unregister(fileno)
-						del clients[fileno]
+						del sockets[fileno]
 						del lookup[fileno]
 					else:
-						clients[fileno]['socket'].recv()
-						clients[fileno]['socket'].parse()
+						sockets[fileno]['socket'].recv()
+						sockets[fileno]['socket'].parse()
 				else:
-					log('Fileno not in clients?', level=5, origin='spiderWeb', function='ws_send')
+					log('Fileno not in sockets?', level=5, origin='spiderWeb', function='ws_send')
 
