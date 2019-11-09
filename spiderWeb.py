@@ -21,7 +21,7 @@ if not 'log' in __builtins__ or ('__dict__' in __builtins__ and not 'log' in __b
 	journald_handler.setFormatter(logging.Formatter('[{levelname}] {message}', style='{'))
 	logger.addHandler(journald_handler)
 	logger.setLevel(logging.DEBUG)
-	LOG_LEVEL = 4
+	LOG_LEVEL = 5
 	class CustomAdapter(logging.LoggerAdapter):
 		def process(self, msg, kwargs):
 			return '[{}] {}'.format(self.extra['origin'], msg), kwargs
@@ -71,115 +71,120 @@ def list_to_dict(_list_):
 	return result
 
 class ws_packet():
-	def __init__(self, data):
+	def __init__(self, data, data_index=0, fragmented=None):
 		## == Some initial checks, to see if we got all the data, the opcode etc.
-		flags = '{0:0>8b}'.format(unpack('B', bytes([data[0]]))[0])
+		flags = '{0:0>8b}'.format(unpack('B', bytes([data[data_index]]))[0])
 		fin, rsv1, rsv2, rsv3 = [True if x == '1' else False for x in flags[0:4]]
 		opcode = int(flags[4:8], 2)
 		
 		self.flags = {'fin' : fin, 'rsv1' : rsv1, 'rsv2' : rsv2, 'rsv3' : rsv3, 'mask' : None}
 		self.opcode = opcode
+		
+		if fragmented in (None, 0, False):
+			if self.opcode != 0 and not self.flags['fin']:
+				self.fragmented = True
+			elif self.flags['fin']:
+				self.fragmented = False
+		else:
+			self.fragmented = fragmented
+
+		self.complete_frame = False
+
 		self.payload_len = 0
 		self.mask_key = None
 		self.data = b''
-		self.carryOver = b''
+		self.raw_data = data
+		#self.carryOver = b''
 		log('Flags:', self.flags, level=10, origin='spiderWeb', function='ws_packet')
-		log('OpCode:', self.opcode, level=10, origin='spiderWeb', function='ws_packet')
+		log('opcode:', self.opcode, level=10, origin='spiderWeb', function='ws_packet')
 		
 		## == We skip the first 0 index because data[index 0] is the [fin,rsv1,rsv2,rsv3,opcode] byte.
-		self.data_index = 1
+		self.data_index = data_index + 1
+
+		## ------- Begin parsing
 		
-		if fin:
-			if len(data) >= 2 and self.payload_len == 0:
-				## == Check the initial length of the payload.
-				##    Websockets have 3 conditional payload lengths:
-				##	  * https://stackoverflow.com/questions/18271598/how-to-work-out-payload-size-from-html5-websocket
-				self.payload_len = unpack('B', bytes([data[self.data_index]]))[0]
-				self.payload_len = '{0:0>8b}'.format(self.payload_len)
+		if len(data) >= 2 and self.payload_len == 0:
+			## == Check the initial length of the payload.
+			##    Websockets have 3 conditional payload lengths:
+			##	  * https://stackoverflow.com/questions/18271598/how-to-work-out-payload-size-from-html5-websocket
+			self.payload_len = unpack('B', bytes([data[self.data_index]]))[0]
+			self.payload_len = '{0:0>8b}'.format(self.payload_len)
 
-				self.flags['mask'], self.payload_len = (True if self.payload_len[0] == '1' else False), int('{:0>8}'.format(self.payload_len[1:]), 2)
-				self.data_index += 1
+			self.flags['mask'], self.payload_len = (True if self.payload_len[0] == '1' else False), int('{:0>8}'.format(self.payload_len[1:]), 2)
+			self.data_index += 1
 
-			# B = 1
-			# H = 2
-			# I = 4
-			# Q = 8
+		# B = 1
+		# H = 2
+		# I = 4
+		# Q = 8
 
-			## == TODO: When we've successfully established the payload length,
-			##          make sure we actually have recieved that much data.
-			##          (for instance, recv(1024) might get the header, but not the full length)
+		## == TODO: When we've successfully established the payload length,
+		##          make sure we actually have recieved that much data.
+		##          (for instance, recv(1024) might get the header, but not the full length)
 
-			## == CONDITION 1: The length is less than 126 - Which means whatever length this is, is the actual payload length.
-			if self.payload_len < 126:
-				log('Len:', self.payload_len, level=10, origin='spiderWeb', function='ws_packet')
+		## == CONDITION 1: The length is less than 126 - Which means whatever length this is, is the actual payload length.
+		if self.payload_len < 126:
+			log('Len:', self.payload_len, level=10, origin='spiderWeb', function='ws_packet')
 
-			## == CONDITION 2: Length is 126, which means the next [2 bytes] are the length.
-			elif self.payload_len == 126 and len(data) >= self.data_index+2:
-				self.payload_len = unpack('>H', data[self.data_index:self.data_index+2])[0]
-				self.data_index += 2
-				log('Large payload:', self.payload_len, level=10, origin='spiderWeb', function='ws_packet')
+		## == CONDITION 2: Length is 126, which means the next [2 bytes] are the length.
+		elif self.payload_len == 126 and len(data) >= self.data_index+2:
+			self.payload_len = unpack('>H', data[self.data_index:self.data_index+2])[0]
+			self.data_index += 2
+			log('Large payload:', self.payload_len, level=10, origin='spiderWeb', function='ws_packet')
 
-			## == Condition 3: Length is 127, which means the next [8] bytes are the length.
-			elif self.payload_len == 127 and len(data) >= self.data_index+2:
-				self.payload_len = unpack('>Q', data[self.data_index:self.data_index+8])[0]
-				self.data_index += 8
-				log('Huge payload:', self.payload_len, level=10, origin='spiderWeb', function='ws_packet')
+		## == Condition 3: Length is 127, which means the next [8] bytes are the length.
+		elif self.payload_len == 127 and len(data) >= self.data_index+2:
+			self.payload_len = unpack('>Q', data[self.data_index:self.data_index+8])[0]
+			self.data_index += 8
+			log('Huge payload:', self.payload_len, level=10, origin='spiderWeb', function='ws_packet')
 
-			## == We try to see if the package is XOR:ed (mask=True) and data length is larger than 4.
-			if self.flags['mask'] and len(data) >= self.data_index+4:
-				#mask_key = unpack('I', ws[parsed_index:parsed_index+4])[0]
-				self.mask_key = data[self.data_index:self.data_index+4]
-				log('Mask key:', self.mask_key, level=10, origin='spiderWeb', function='ws_packet')
-				self.data_index += 4
+		if len(data) < self.payload_len:
+			self.complete_frame = False
+			return
 
-			if self.flags['mask']:
-				self.data = b''
-				log('[XOR::Data]:', data[self.data_index:self.data_index+self.payload_len], level=10, origin='spiderWeb', function='ws_packet')
-				for index, c in enumerate(data[self.data_index:self.data_index+self.payload_len]):
-					self.data += bytes([c ^ self.mask_key[(index%4)]])
+		## == We try to see if the package is XOR:ed (mask=True) and data length is larger than 4.
+		if self.flags['mask'] and len(data) >= self.data_index+4:
+			#mask_key = unpack('I', ws[parsed_index:parsed_index+4])[0]
+			self.mask_key = data[self.data_index:self.data_index+4]
+			log('Mask key:', self.mask_key, level=10, origin='spiderWeb', function='ws_packet')
+			self.data_index += 4
 
-				## == carry over the remainer.
-				self.carryOver = data[self.data_index+self.payload_len:]
+		if self.flags['mask']:
+			self.data = b''
+			log('[XOR::Data]:', data[self.data_index:self.data_index+self.payload_len], level=10, origin='spiderWeb', function='ws_packet')
+			for index, c in enumerate(data[self.data_index:self.data_index+self.payload_len]):
+				self.data += bytes([c ^ self.mask_key[(index%4)]])
+			log('[   ::Data]:', self.data, level=9, origin='spiderWeb', function='ws_packet')
+			self.data_index += self.payload_len
 
-				log('[   ::Data]:', self.data, level=9, origin='spiderWeb', function='ws_packet')
-				if self.data == b'PING':
-					self.data = b''
-					return
-				#self.ws_send(b'Pong')
+			if self.data == b'PING':
+				#self.ws_send(b'Pong') #?
+				self.data = None
+				return
 
-				if len(self.data) < self.payload_len:
-					self.carryOver = self.data + self.carryOver
-					## Ok so, TODO:
-					#  This fucking code shouldn't need to be here...
-					#  I don't know WHY handler.poll() in core.py doesn't work as it should,
-					#  but it should return a fileno+event when there's more data to the payload.
-					#  But for whatever reason, handler.poll() returms empty even tho there's more data
-					#  to be collected for this websocket-packet.. and doing recv() again does actually
-					#  return more data - epoll() just don't know about it for some reason.
-					#  So the only way to do this, is to raise PacketIncomplete() and let outselves
-					#  trigger another recv() manually from within this parse-session.
-					#  The main issue with this tho, is that someone could send a fake length + not send data.
-					#  Effectively blocking this entire application.. I don't like this one bit..
-					#  But for now, fuck it, just keep the project going and we'll figure out why later!
-					#  (FAMOUSE LAST WORDS)
-					raise PacketIncomplete("Incomplete packet.", (self.payload_len, len(self.carryOver)))
-				else:
-					try:
-						self.data = loads(self.data.decode('UTF-8'))
-					except UnicodeDecodeError:
-						log('[ERROR] UnicodeDecodeError:', self.data, level=2, origin='spiderWeb', function='ws_packet')
-						self.data = b''
-						return
-					except Exception as e:
-						log('Could not JSON encode the data:', level=3, origin='spiderWeb', function='ws_packet')
-						log(e, level=3)
-						raise ValueError("Could not parse the data as JSON.\n{}".format(self.data[:100]), e)
-
-				#log('<<', self.data, level=5, origin='spiderWeb', function='ws_packet')
-				# retData = self.parsers[parser].protocol.parse(data, self.headers, self.sock.fileno(), self.addr)
-				# if retData:
-				# 	log('>>', retData, level=5, origin='spiderWeb', function='ws_packet')
-				# 	self.ws_send(retData)
+			if len(self.data) < self.payload_len:
+				self.complete_frame = False
+				## Ok so, TODO:
+				#  This fucking code shouldn't need to be here...
+				#  I don't know WHY handler.poll() in core.py doesn't work as it should,
+				#  but it should return a fileno+event when there's more data to the payload.
+				#  But for whatever reason, handler.poll() returms empty even tho there's more data
+				#  to be collected for this websocket-packet.. and doing recv() again does actually
+				#  return more data - epoll() just don't know about it for some reason.
+				#  So the only way to do this, is to raise PacketIncomplete() and let outselves
+				#  trigger another recv() manually from within this parse-session.
+				#  The main issue with this tho, is that someone could send a fake length + not send data.
+				#  Effectively blocking this entire application.. I don't like this one bit..
+				#  But for now, fuck it, just keep the project going and we'll figure out why later!
+				#  (FAMOUSE LAST WORDS)
+				#raise PacketIncomplete("Incomplete packet.", (self.payload_len, len(self.carryOver)))
+			else:
+				self.complete_frame = True
+				if self.flags['fin']:
+					if self.fragmented:
+						self.fragmented = False
+					else:
+						self.cleanup_fragmented() # Also used internally for normal data
 
 	def __enter__(self):
 		return self
@@ -188,9 +193,27 @@ class ws_packet():
 		pass
 
 	def getRemainder(self):
-		tmp = self.carryOver
-		self.carryOver = b''
-		return tmp
+		if not self.complete_frame:
+			index = self.data_index = 0
+		elif self.fragmented or self.flags['fin']:
+			index = self.data_index
+			self.data_index = 0
+		else:
+			index = self.data_index
+
+		return self.raw_data[index:]
+
+	def cleanup_fragmented(self):
+		try:
+			self.data = loads(self.data.decode('UTF-8'))
+		except UnicodeDecodeError:
+			log('[ERROR] UnicodeDecodeError:', self.data, level=2, origin='spiderWeb', function='ws_packet')
+			self.data = b''
+			return
+		except Exception as e:
+			log('Could not JSON encode the data:', level=3, origin='spiderWeb', function='ws_packet')
+			log(e, level=3)
+			raise ValueError("Could not parse the data as JSON: {} ... {}".format(self.data[:40], self.data[-40:]), e)
 
 class upgrader():
 	def __init__(self, parsers):
@@ -229,6 +252,9 @@ class ws_client():
 		self.keep_alive = True
 		self.upgraded = False
 
+		self.fragments = []
+		self.fragment_indexer = 0
+
 		self.init_headers = {}
 
 		#self.ws_packet = {'flags' : {'fin' : None, 'rsv1' : None, 'rsv2' : None, 'rsv3' : None, 'mask' : None},
@@ -256,32 +282,35 @@ class ws_client():
 	def websock_parse(self):
 		## TODO: Large data streams could end up clogging the pipepine for other clients.
 		
-		loop = 0
 		while 1:
 			if len(self.data) <= 0:
 				break # No more data here
 
-			loop += 1
 			log('[Parsing packet]:', self.data[:100], level=10, origin='spiderWeb', function='websock_parse')
-			try:
-				## == Set up a ws_packet() based on all the data the client has sent us.
-				packet = ws_packet(self.data)
-			except PacketIncomplete as e:
-				log('PacketIncomplete() was raised. retrying recv() (might block everything)', level=2, origin='spiderWeb', function='websock_parse')
-				self.recv()
-				for response in self.websock_parse():
-					yield response
+
+			## == Set up a ws_packet() based on all the data the client has sent us.
+			packet = ws_packet(self.data, self.fragment_indexer, fragmented=len(self.fragments))
+			self.data = packet.getRemainder()
+			self.fragment_indexer = packet.data_index
+
+			if packet.complete_frame:
+				if packet.fragmented and not packet.flags['fin']:
+					self.fragments.append(packet.data)
+				elif not packet.fragmented and packet.flags['fin'] and len(self.fragments):
+					self.fragments.append(packet.data)
+					packet.data = b''.join(self.fragments)
+					self.fragments = []
+					packet.data = packet.cleanup_fragmented()
+			else:
 				break
 
 			## == If we've recieved all the data, set the ws_client() internal data to
 			##    any remainder the ws_packet() might have since the client might have sent
 			##    two packets in one transfer, the next loop we'll set up a new ws_packet() with the remainder.
 
-			if packet.flags['fin']:
-				self.data = packet.getRemainder()
-
-				if packet.data == b'':
-					continue
+			if packet.flags['fin'] and packet.complete_frame and packet.data and not packet.fragmented:
+				#if packet.data == b'':
+				#	continue
 
 				## == Call all our parsers and yield any data they have.
 				for parser in self.parsers:
@@ -343,7 +372,7 @@ class ws_client():
 
 			# Payload len is padded with mask
 			packet += payload_len + extended_len + mask_key + segment
-			log('[Flags::Data]:', {'fin': fin, 'rsv1': rsv1, 'rsv2': rsv2, 'rsv3': rsv3, 'mask': True if mask == b'1' else False, 'OpCode':opcode, 'len' : len(segment), 'mask_key' : mask_key}, segment, level=10, origin='spiderWeb', function='ws_send')
+			log('[Flags::Data]:', {'fin': fin, 'rsv1': rsv1, 'rsv2': rsv2, 'rsv3': rsv3, 'mask': True if mask == b'1' else False, 'opcode':opcode, 'len' : len(segment), 'mask_key' : mask_key}, segment, level=10, origin='spiderWeb', function='ws_send')
 
 			#log(data.decode('UTF-8'), origin='spiderWeb', function='ws_send')
 			log('[Final::Data]:', packet, level=10, origin='spiderWeb', function='ws_send')
