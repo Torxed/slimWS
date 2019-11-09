@@ -21,7 +21,7 @@ if not 'log' in __builtins__ or ('__dict__' in __builtins__ and not 'log' in __b
 	journald_handler.setFormatter(logging.Formatter('[{levelname}] {message}', style='{'))
 	logger.addHandler(journald_handler)
 	logger.setLevel(logging.DEBUG)
-	LOG_LEVEL = 5
+	LOG_LEVEL = 4
 	class CustomAdapter(logging.LoggerAdapter):
 		def process(self, msg, kwargs):
 			return '[{}] {}'.format(self.extra['origin'], msg), kwargs
