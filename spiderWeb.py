@@ -224,7 +224,7 @@ class upgrader():
 		self.parsers = parsers
 
 	def upgrade(self, client, headers, data):
-		log(f'Handling upgrade request from: {client}', level=4, origin='spiderWeb', function='upgrader.upgrade()')
+		log(f'Handling upgrade request from: {client}', level=5, origin='spiderWeb', function='upgrader.upgrade()')
 		client.keep_alive = True
 
 		init_headers = headers.copy()
@@ -243,7 +243,7 @@ class upgrader():
 		c = ws_client(client.socket, client.info['addr'], data, self.parsers)
 		c.state = 'WEBSOCK'
 
-		log(f'{client} has been upgraded', level=4, origin='spiderWeb', function='upgrader.upgrade()')
+		log(f'{client} has been upgraded', level=5, origin='spiderWeb', function='upgrader.upgrade()')
 		return c
 
 class ws_client():
