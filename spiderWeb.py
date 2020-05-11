@@ -80,7 +80,7 @@ class ws_packet():
 		flags = '{0:0>8b}'.format(unpack('B', bytes([data[data_index]]))[0])
 		fin, rsv1, rsv2, rsv3 = [True if x == '1' else False for x in flags[0:4]]
 		opcode = int(flags[4:8], 2)
-		
+
 		self.flags = {'fin' : fin, 'rsv1' : rsv1, 'rsv2' : rsv2, 'rsv3' : rsv3, 'mask' : None}
 		self.opcode = opcode
 		
@@ -186,9 +186,9 @@ class ws_packet():
 				self.complete_frame = True
 				if self.flags['fin']:
 					if self.fragmented:
-						self.fragmented = False
+						self.fragmented = False # TODO: needed?
 					else:
-						self.cleanup_fragmented() # Also used internally for normal data
+						self.convert_to_json() # Also used internally for normal data
 
 	def __enter__(self):
 		return self
@@ -207,13 +207,13 @@ class ws_packet():
 
 		return self.raw_data[index:]
 
-	def cleanup_fragmented(self):
+	def convert_to_json(self):
 		try:
 			self.data = loads(self.data.decode('UTF-8'))
 		except UnicodeDecodeError:
 			log('[ERROR] UnicodeDecodeError:', self.data, level=2, origin='spiderWeb', function='ws_packet')
 			self.data = b''
-			return
+			return False
 		except Exception as e:
 			log('Could not JSON encode the data:', level=3, origin='spiderWeb', function='ws_packet')
 			log(e, level=3)
@@ -294,6 +294,7 @@ class ws_client():
 
 			## == Set up a ws_packet() based on all the data the client has sent us.
 			packet = ws_packet(self.data, self.fragment_indexer, fragmented=len(self.fragments))
+
 			self.data = packet.getRemainder()
 			self.fragment_indexer = packet.data_index
 
@@ -304,7 +305,7 @@ class ws_client():
 					self.fragments.append(packet.data)
 					packet.data = b''.join(self.fragments)
 					self.fragments = []
-					packet.data = packet.cleanup_fragmented()
+					packet.convert_to_json()
 			else:
 				break
 
@@ -424,7 +425,7 @@ class ws_client():
 				log('>>', data, level=5, origin='spiderWeb', function='ws_send')
 				self.ws_send(data)
 		else:
-			log('!!', 'Missing data/headers:', data, origin='spiderWeb', function='ws_send')
+			log('!!', 'Missing data/headers:', self.data, origin='spiderWeb', function='ws_send')
 
 	def recv(self, buf=8192):
 		try:
