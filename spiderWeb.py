@@ -67,6 +67,8 @@ class Events():
 	WS_CLIENT_REQUEST = 0b11000001
 	WS_CLIENT_COMPLETE_FRAME = 0b11000010
 	WS_CLIENT_INCOMPLETE_FRAME = 0b11000011
+	WS_CLIENT_ROUTING = 0b11000100
+	WS_CLIENT_ROUTED = 0b11000101
 
 	NOT_YET_IMPLEMENTED = 0b00000000
 
@@ -101,6 +103,7 @@ class WS_ROUTE():
 class WebSocket():
 	def __init__(self):
 		self.routes = {}
+		self.loaded_apis = {}
 
 	def log(self, *args, **kwargs):
 		print(' '.join([str(x) for x in args]))
@@ -112,6 +115,98 @@ class WebSocket():
 	def WS_CLIENT_IDENTITY(self, request):
 		self.log=request.CLIENT_IDENTITY.server.log
 		return WS_CLIENT_IDENTITY(request, server=self)
+
+#	def find_final_module_path(path, data):
+#		if '_module' in data:
+#			if data['_module'] in data and '_module' in data[data['_module']] and isdir(f"{path}/{data['_module']}"):
+#				return find_final_module_path(path=f"{path}/{data['_module']}", data=data[data['_module']])
+#			elif isfile(f"{path}/{data['_module']}.py"):
+#				return {'path' : f"{path}/{data['_module']}.py", 'data' : data, 'api_path' : ':'.join(f"{path}/{data['_module']}"[len('./api_modules/'):].split('/'))}
+
+	def find_final_module_path(path, data):
+		full_path = f"{path}/{data['_module']}.py"
+		if isfile(full_path):
+			return full_path
+
+	def importer(path):
+		old_version = False
+		self.log(f'Request to import "{path}"', level=6, origin='importer')
+		if path not in self.loaded_apis:
+			## https://justus.science/blog/2015/04/19/sys.modules-is-dangerous.html
+			try:
+				self.log(f'Loading API module: {path}', level=4, origin='importer')
+				spec = importlib.util.spec_from_file_location(path, path)
+				self.loaded_apis[path] = importlib.util.module_from_spec(spec)
+				spec.loader.exec_module(self.loaded_apis[path])
+				sys.modules[path] = self.loaded_apis[path]
+			except (SyntaxError, ModuleNotFoundError) as e:
+				self.log(f'Failed to load API module ({e}): {path}', level=2, origin='importer')
+				return None
+		else:
+			try:
+				raise SyntaxError('https://github.com/Torxed/ADderall/issues/11')
+			except SyntaxError as e:
+				old_version = True
+
+		return old_version, self.loaded_apis[f'{path}']
+
+	def route_parser_func(self, frame):
+		if type(frame.data) is not dict or '_module' not in frame.data:
+			self.log(f'Invalid request sent, missing _module in JSON data: {str(frame.data)[:200]}', source='WebSocket.route_parser_func(WS_FRAME)')
+			return
+
+		## TODO: Add path security!
+		module_to_load = self.find_final_module_path('./api_modules', frame.data)
+		if(module_to_load):
+			import_result = importer(module_to_load)
+			if import_result:
+				old_version, handle = import_result
+
+				# Just keep track if we're executing the new code or the old, for logging purposes only
+				if not old_version:
+					self.log(f'Calling {handle}.parser.process(client, data, headers, fileno, addr, *args, **kwargs)', source='WebSocket.route_parser_func(WS_FRAME)')
+				else:
+					self.log(f'Calling old {handle}.parser.process(client, data, headers, fileno, addr, *args, **kwargs)', source='WebSocket.route_parser_func(WS_FRAME)')
+
+				try:
+					response = modules[module_to_load].parser.process(frame)
+					if response:
+						if isinstance(response, Iterator):
+							for item in response:
+								yield {
+									**item,
+									'_uid' : data['_uid'] if '_uid' in data else None,
+									'_modules' : module_to_load['api_path']
+								}
+						else:
+							yield {
+								**response,
+								'_uid' : data['_uid'] if '_uid' in data else None,
+								'_modules' : module_to_load['api_path']
+							}
+				except BaseException as e:
+					exc_type, exc_obj, exc_tb = sys.exc_info()
+					fname = path_split(exc_tb.tb_frame.f_code.co_filename)[1]
+					self.log(f'Module error in {fname}@{exc_tb.tb_lineno}: {e} ', source='WebSocket.route_parser_func(WS_FRAME)')
+					self.log(traceback.format_exc(), level=2, origin='pre_parser', function='parse')
+		else:
+			self.log(f'Invalid data, trying to load a inexisting module: {data["_module"]} ({str(data)[:200]})', level=3, origin='pre_parser', function='parse')	
+
+
+	def post_process_frame(self, frame):
+		try:
+			frame.data = loads(frame.data.decode('UTF-8'))
+			for event, state in self.route_parser_func(frame):
+				yield (event, state)
+		except UnicodeDecodeError:
+			self.log('[ERROR] UnicodeDecodeError:', frame.data, source='WebSocket.post_process_frame(WS_FRAME)')
+			return None
+		except Exception as e:
+			exc_type, exc_obj, exc_tb = sys.exc_info()
+			fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
+			self.log(f'JSON error loading data {fname}@{exc_tb.tb_lineno}:', frame.data, source='WebSocket.post_process_frame(WS_FRAME)')
+			self.log(traceback.format_exc(), level=3)
+			return None
 
 class WS_CLIENT_IDENTITY():
 	def __init__(self, request, server=None):
@@ -177,7 +272,7 @@ class WS_CLIENT_IDENTITY():
 		self.socket.send(data)
 
 	def build_request(self):
-		yield (Events.WS_CLIENT_REQUEST, WS_FRAME(self))
+		yield (Events.CLIENT_REQUEST, WS_FRAME(self))
 
 	def has_data(self):
 		if self.closing: return False
@@ -222,7 +317,7 @@ class WS_FRAME():
 		self.data_index += 1
 
 		## ------- Begin parsing
-		
+
 		if len(self.raw_data) >= 2 and self.payload_len == 0:
 			## == Check the initial length of the payload.
 			##    Websockets have 3 conditional payload lengths:
@@ -277,13 +372,15 @@ class WS_FRAME():
 			self.CLIENT_IDENTITY.server.log('[   ::Data]:', self.data, level=9, origin='spiderWeb', function='ws_packet')
 			self.data_index += self.payload_len
 
-			print('Data:', self.data)
+			self.CLIENT_IDENTITY.buffer = self.CLIENT_IDENTITY.buffer[self.data_index:]
+
 
 			if self.data == b'PING':
 				#self.ws_send(b'Pong') #?
 				self.data = None
 				return
 
+			print('Data:', self.data)
 			if len(self.data) < self.payload_len:
 				self.complete_frame = False
 				## Ok so, TODO:
@@ -309,6 +406,10 @@ class WS_FRAME():
 					#else:
 					#	self.convert_to_json() # Also used internally for normal data
 					yield (Events.WS_CLIENT_COMPLETE_FRAME, self)
+
+					for subevent, entity in self.CLIENT_IDENTITY.server.post_process_frame(self):
+						#yield (Events.WS_CLIENT_ROUTING, )
+						yield subevent, entity
 				else:
 					print('Got unfinished data')
 					yield (Events.WS_CLIENT_INCOMPLETE_FRAME, self)
