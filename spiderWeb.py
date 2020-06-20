@@ -69,6 +69,7 @@ class Events():
 	WS_CLIENT_INCOMPLETE_FRAME = 0b11000011
 	WS_CLIENT_ROUTING = 0b11000100
 	WS_CLIENT_ROUTED = 0b11000101
+	WS_CLIENT_RESPONSE = 0b11000110
 
 	NOT_YET_IMPLEMENTED = 0b00000000
 
@@ -123,8 +124,8 @@ class WebSocket():
 #			elif isfile(f"{path}/{data['_module']}.py"):
 #				return {'path' : f"{path}/{data['_module']}.py", 'data' : data, 'api_path' : ':'.join(f"{path}/{data['_module']}"[len('./api_modules/'):].split('/'))}
 
-	def find_final_module_path(path, data):
-		full_path = f"{path}/{data['_module']}.py"
+	def find_final_module_path(path, frame):
+		full_path = f"{path}/{frame.data['_module']}.py"
 		if isfile(full_path):
 			return full_path
 
@@ -155,42 +156,46 @@ class WebSocket():
 			self.log(f'Invalid request sent, missing _module in JSON data: {str(frame.data)[:200]}', source='WebSocket.route_parser_func(WS_FRAME)')
 			return
 
-		## TODO: Add path security!
-		module_to_load = self.find_final_module_path('./api_modules', frame.data)
-		if(module_to_load):
-			import_result = importer(module_to_load)
-			if import_result:
-				old_version, handle = import_result
+		if frame.data['_module'] in self.routes:
+			response = self.routes[frame.data['_module']].func(frame)
+			yield (Events.WS_CLIENT_RESPONSE, response)
+		else:
+			## TODO: Add path security!
+			module_to_load = self.find_final_module_path('./api_modules', frame)
+			if(module_to_load):
+				import_result = importer(module_to_load)
+				if import_result:
+					old_version, handle = import_result
 
-				# Just keep track if we're executing the new code or the old, for logging purposes only
-				if not old_version:
-					self.log(f'Calling {handle}.parser.process(client, data, headers, fileno, addr, *args, **kwargs)', source='WebSocket.route_parser_func(WS_FRAME)')
-				else:
-					self.log(f'Calling old {handle}.parser.process(client, data, headers, fileno, addr, *args, **kwargs)', source='WebSocket.route_parser_func(WS_FRAME)')
+					# Just keep track if we're executing the new code or the old, for logging purposes only
+					if not old_version:
+						self.log(f'Calling {handle}.parser.process(client, data, headers, fileno, addr, *args, **kwargs)', source='WebSocket.route_parser_func(WS_FRAME)')
+					else:
+						self.log(f'Calling old {handle}.parser.process(client, data, headers, fileno, addr, *args, **kwargs)', source='WebSocket.route_parser_func(WS_FRAME)')
 
-				try:
-					response = modules[module_to_load].parser.process(frame)
-					if response:
-						if isinstance(response, Iterator):
-							for item in response:
+					try:
+						response = modules[module_to_load].parser.process(frame)
+						if response:
+							if isinstance(response, Iterator):
+								for item in response:
+									yield {
+										**item,
+										'_uid' : data['_uid'] if '_uid' in data else None,
+										'_modules' : module_to_load['api_path']
+									}
+							else:
 								yield {
-									**item,
+									**response,
 									'_uid' : data['_uid'] if '_uid' in data else None,
 									'_modules' : module_to_load['api_path']
 								}
-						else:
-							yield {
-								**response,
-								'_uid' : data['_uid'] if '_uid' in data else None,
-								'_modules' : module_to_load['api_path']
-							}
-				except BaseException as e:
-					exc_type, exc_obj, exc_tb = sys.exc_info()
-					fname = path_split(exc_tb.tb_frame.f_code.co_filename)[1]
-					self.log(f'Module error in {fname}@{exc_tb.tb_lineno}: {e} ', source='WebSocket.route_parser_func(WS_FRAME)')
-					self.log(traceback.format_exc(), level=2, origin='pre_parser', function='parse')
-		else:
-			self.log(f'Invalid data, trying to load a inexisting module: {data["_module"]} ({str(data)[:200]})', level=3, origin='pre_parser', function='parse')	
+					except BaseException as e:
+						exc_type, exc_obj, exc_tb = sys.exc_info()
+						fname = path_split(exc_tb.tb_frame.f_code.co_filename)[1]
+						self.log(f'Module error in {fname}@{exc_tb.tb_lineno}: {e} ', source='WebSocket.route_parser_func(WS_FRAME)')
+						self.log(traceback.format_exc(), level=2, origin='pre_parser', function='parse')
+			else:
+				self.log(f'Invalid data, trying to load a inexisting module: {data["_module"]} ({str(data)[:200]})', level=3, origin='pre_parser', function='parse')	
 
 
 	def post_process_frame(self, frame):
