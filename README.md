@@ -1,5 +1,6 @@
 # spiderWeb
-WebSocket API engine
+WebSocket API engine.<br>
+Works best with [slimHTTP](https://github.com/Torxed/slimHTTP) although it does work all on its own. 
 
 # Example usage
 
@@ -12,6 +13,10 @@ server = spiderWeb.host(address='', port=4001)
 def parse(self, frame):
 	print('Got WebSocket frame:', frame.data)
 	yield {'status' : 'successful'}
+
+while 1:
+	for event, *event_data in server.poll():
+		pass
 ```
 # Modules
 
