@@ -3,47 +3,44 @@ from socket import *
 from base64 import b64encode
 from hashlib import sha1
 from json import loads, dumps
-from select import epoll, EPOLLIN
 from struct import pack, unpack
 from datetime import date, datetime
+try:
+	from select import epoll, EPOLLIN
+except:
+	""" #!if windows
+	Create a epoll() implementation that simulates the epoll() behavior.
+	This so that the rest of the code doesn't need to worry weither or not epoll() exists.
+	"""
+	import select
+	EPOLLIN = None
+	class epoll():
+		def __init__(self):
+			self.sockets = {}
+			self.monitoring = {}
+
+		def unregister(self, fileno, *args, **kwargs):
+			try:
+				del(self.monitoring[fileno])
+			except:
+				pass
+
+		def register(self, fileno, *args, **kwargs):
+			self.monitoring[fileno] = True
+
+		def poll(self, timeout=0.5, *args, **kwargs):
+			try:
+				return [[fileno, 1] for fileno in select.select(list(self.monitoring.keys()), [], [], timeout)[0]]
+			except OSError:
+				return []
 
 try:
 	if not 'LEVEL' in __builtins__.__dict__: __builtins__.__dict__['LEVEL'] = 1
 except:
 	if not 'LEVEL' in __builtins__: __builtins__['LEVEL'] = 1
 
-#ifdef !log (Yea I know, this should be a 'from main import log' or at least a try/catch)
-if not 'log' in __builtins__ or ('__dict__' in __builtins__ and not 'log' in __builtins__.__dict__):
-	import logging
-	from systemd.journal import JournalHandler
-	logger = logging.getLogger() # __name__
-	journald_handler = JournalHandler()
-	journald_handler.setFormatter(logging.Formatter('[{levelname}] {message}', style='{'))
-	logger.addHandler(journald_handler)
-	logger.setLevel(logging.DEBUG)
-	LOG_LEVEL = 4
-	class CustomAdapter(logging.LoggerAdapter):
-		def process(self, msg, kwargs):
-			return '[{}] {}'.format(self.extra['origin'], msg), kwargs
-	def _log(*msg, origin='UNKNOWN', level=5, **kwargs):
-		if level <= LOG_LEVEL:
-			msg = [item.decode('UTF-8', errors='backslashreplace') if type(item) == bytes else item for item in msg]
-			msg = [str(item) if type(item) != str else item for item in msg]
-			log_adapter = CustomAdapter(logger, {'origin': origin})
-			if level <= 1:
-				log_adapter.critical(' '.join(msg))
-			elif level <= 2:
-				log_adapter.error(' '.join(msg))
-			elif level <= 3:
-				log_adapter.warning(' '.join(msg))
-			elif level <= 4:
-				log_adapter.info(' '.join(msg))
-			else:
-				log_adapter.debug(' '.join(msg))
-	try:
-		__builtins__.__dict__['log'] = _log
-	except:
-		__builtins__['log'] = _log
+def log(*args, **kwargs):
+	print(' '.join([str(x) for x in args]))
 
 class PacketIncomplete(Exception):
 	def __init__(self, message, errors):
@@ -53,6 +50,25 @@ class PacketIncomplete(Exception):
 
 		# Now for your custom code...
 		self.errors = errors
+
+class Events():
+	SERVER_ACCEPT = 0b10000000
+	SERVER_CLOSE = 0b10000001
+	SERVER_RESTART = 0b00000010
+
+	CLIENT_DATA = 0b01000000
+	CLIENT_REQUEST = 0b01000001
+	CLIENT_RESPONSE_DATA = 0b01000010
+	CLIENT_UPGRADED = 0b01000011
+	CLIENT_UPGRADE_ISSUE = 0b01000100
+	CLIENT_URL_ROUTED = 0b01000101
+
+	WS_CLIENT_DATA = 0b11000000
+	WS_CLIENT_REQUEST = 0b11000001
+	WS_CLIENT_COMPLETE_FRAME = 0b11000010
+	WS_CLIENT_INCOMPLETE_FRAME = 0b11000011
+
+	NOT_YET_IMPLEMENTED = 0b00000000
 
 def json_serial(obj):
 	if isinstance(obj, (datetime, date)):
@@ -73,6 +89,229 @@ def list_to_dict(_list_):
 	for index, item in enumerate(a):
 		result[item] = b[index]
 	return result
+
+class WS_ROUTE():
+	def __init__(self, route, func=None):
+		self.route = route
+		self.func = func
+
+	def router(self, f, *args, **kwargs):
+		self.func = f
+
+class WebSocket():
+	def __init__(self):
+		self.routes = {}
+
+	def log(self, *args, **kwargs):
+		print(' '.join([str(x) for x in args]))
+
+	def route(self, URL, *args, **kwargs):
+		self.routes[URL] = WS_ROUTE(URL)
+		return self.routes[URL].router
+
+	def WS_CLIENT_IDENTITY(self, request):
+		self.log=request.CLIENT_IDENTITY.server.log
+		return WS_CLIENT_IDENTITY(request, server=self)
+
+class WS_CLIENT_IDENTITY():
+	def __init__(self, request, server=None):
+		if not server: server = request.CLIENT_IDENTITY.server
+		self.server = server
+		self.socket = request.CLIENT_IDENTITY.socket
+		self.fileno = request.CLIENT_IDENTITY.fileno
+		self.address = request.CLIENT_IDENTITY.address
+		self.keep_alive = request.CLIENT_IDENTITY.keep_alive
+		self.buffer_size = 8192
+		self.closing = False
+
+		self.buffer = request.CLIENT_IDENTITY.buffer # Take over the buffer
+		self.on_close = request.CLIENT_IDENTITY.on_close
+
+	def upgrade(self, request):
+		self.server.log(f'Performing upgrade() response for: {self}', level=5, source='WS_CLIENT_IDENTITY.upgrade()')
+		self.keep_alive = True
+
+		magic_key = request.request_headers[b'sec-websocket-key'] + b'258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
+		magic_hash = sha1(magic_key).digest()
+
+		resp = b''
+		resp += b'HTTP/1.1 101 Switching protocols\r\n'
+		resp += b'Upgrade: websocket\r\n'
+		resp += b'Connection: Upgrade\r\n'
+		resp += b'Sec-WebSocket-Accept: ' + b64encode(magic_hash) + b'\r\n'
+		resp += b'\r\n'
+
+		self.socket.send(resp)
+		self.buffer = b''
+
+		self.server.log(f'{self}\'s upgrade response is sent.', level=5, source='WS_CLIENT_IDENTITY.upgrade()')
+
+	def close(self):
+		if not self.closing:
+			self.closing = True
+			self.on_close(self)
+
+	def on_close(self, *args, **kwargs):
+		if not self.closing:
+			self.server.on_close_func(self)
+
+	def poll(self, timeout=0.2, force_recieve=False):
+		"""
+		@force_recieve: If the caller knows there's data, we can override
+		the polling event and skip straight to data recieving.
+		"""
+		if force_recieve or list(self.server.poll(timeout, fileno=self.fileno)):
+			try:
+				d = self.socket.recv(self.buffer_size)
+			except: # There's to many errors that can be thrown here for differnet reasons, SSL, OSError, Connection errors etc.
+			        # They all mean the same thing, things broke and the client couldn't deliver data accordingly so eject.
+				d = ''
+
+			if len(d) == 0:
+				return self.on_close(self)
+
+			self.buffer += d
+			yield (Events.WS_CLIENT_DATA, len(self.buffer))
+
+	def send(self, data):
+		self.socket.send(data)
+
+	def build_request(self):
+		yield (Events.WS_CLIENT_REQUEST, WS_FRAME(self))
+
+	def has_data(self):
+		if self.closing: return False
+		return True if len(self.buffer) else False
+
+	def __repr__(self):
+		return f'<spiderWeb.WS_CLIENT_IDENTITY @ {self.address}>'
+
+class WS_FRAME():
+	def __init__(self, CLIENT_IDENTITY):
+		self.CLIENT_IDENTITY = CLIENT_IDENTITY
+
+	def parse(self):
+		## == Some initial checks, to see if we got all the data, the opcode etc.
+		self.data_index = 0
+		flags = '{0:0>8b}'.format(unpack('B', bytes([self.CLIENT_IDENTITY.buffer[self.data_index]]))[0])
+		fin, rsv1, rsv2, rsv3 = [True if x == '1' else False for x in flags[0:4]]
+		opcode = int(flags[4:8], 2)
+
+		self.flags = {'fin' : fin, 'rsv1' : rsv1, 'rsv2' : rsv2, 'rsv3' : rsv3, 'mask' : None}
+		self.opcode = opcode
+		
+		#if fragmented in (None, 0, False):
+		#	if self.opcode != 0 and not self.flags['fin']:
+		#		self.fragmented = True
+		#	elif self.flags['fin']:
+		#		self.fragmented = False
+		#else:
+		#	self.fragmented = fragmented
+
+		self.complete_frame = False
+
+		self.payload_len = 0
+		self.mask_key = None
+		self.data = b''
+		self.raw_data = self.CLIENT_IDENTITY.buffer
+		#self.carryOver = b''
+		self.CLIENT_IDENTITY.server.log('Flags:', self.flags, level=10, origin='spiderWeb', function='ws_packet')
+		self.CLIENT_IDENTITY.server.log('opcode:', self.opcode, level=10, origin='spiderWeb', function='ws_packet')
+		
+		## == We skip the first 0 index because data[index 0] is the [fin,rsv1,rsv2,rsv3,opcode] byte.
+		self.data_index += 1
+
+		## ------- Begin parsing
+		
+		if len(self.raw_data) >= 2 and self.payload_len == 0:
+			## == Check the initial length of the payload.
+			##    Websockets have 3 conditional payload lengths:
+			##	  * https://stackoverflow.com/questions/18271598/how-to-work-out-payload-size-from-html5-websocket
+			self.payload_len = unpack('B', bytes([self.raw_data[self.data_index]]))[0]
+			self.payload_len = '{0:0>8b}'.format(self.payload_len)
+
+			self.flags['mask'], self.payload_len = (True if self.payload_len[0] == '1' else False), int('{:0>8}'.format(self.payload_len[1:]), 2)
+			self.data_index += 1
+
+		# B = 1
+		# H = 2
+		# I = 4
+		# Q = 8
+
+		## == TODO: When we've successfully established the payload length,
+		##          make sure we actually have recieved that much data.
+		##          (for instance, recv(1024) might get the header, but not the full length)
+
+		## == CONDITION 1: The length is less than 126 - Which means whatever length this is, is the actual payload length.
+		if self.payload_len < 126:
+			self.CLIENT_IDENTITY.server.log('Len:', self.payload_len, level=10, origin='spiderWeb', function='ws_packet')
+
+		## == CONDITION 2: Length is 126, which means the next [2 bytes] are the length.
+		elif self.payload_len == 126 and len(self.raw_data) >= self.data_index+2:
+			self.payload_len = unpack('>H', self.raw_data[self.data_index:self.data_index+2])[0]
+			self.data_index += 2
+			self.CLIENT_IDENTITY.server.log('Large payload:', self.payload_len, level=10, origin='spiderWeb', function='ws_packet')
+
+		## == Condition 3: Length is 127, which means the next [8] bytes are the length.
+		elif self.payload_len == 127 and len(self.raw_data) >= self.data_index+2:
+			self.payload_len = unpack('>Q', self.raw_data[self.data_index:self.data_index+8])[0]
+			self.data_index += 8
+			self.CLIENT_IDENTITY.server.log('Huge payload:', self.payload_len, level=10, origin='spiderWeb', function='ws_packet')
+
+		if len(self.raw_data) < self.payload_len:
+			self.complete_frame = False
+			return
+
+		## == We try to see if the package is XOR:ed (mask=True) and data length is larger than 4.
+		if self.flags['mask'] and len(self.raw_data) >= self.data_index+4:
+			#mask_key = unpack('I', ws[parsed_index:parsed_index+4])[0]
+			self.mask_key = self.raw_data[self.data_index:self.data_index+4]
+			self.CLIENT_IDENTITY.server.log('Mask key:', self.mask_key, level=10, origin='spiderWeb', function='ws_packet')
+			self.data_index += 4
+
+		if self.flags['mask']:
+			self.data = b''
+			self.CLIENT_IDENTITY.server.log('[XOR::Data]:', self.raw_data[self.data_index:self.data_index+self.payload_len], level=10, origin='spiderWeb', function='ws_packet')
+			for index, c in enumerate(self.raw_data[self.data_index:self.data_index+self.payload_len]):
+				self.data += bytes([c ^ self.mask_key[(index%4)]])
+			self.CLIENT_IDENTITY.server.log('[   ::Data]:', self.data, level=9, origin='spiderWeb', function='ws_packet')
+			self.data_index += self.payload_len
+
+			print('Data:', self.data)
+
+			if self.data == b'PING':
+				#self.ws_send(b'Pong') #?
+				self.data = None
+				return
+
+			if len(self.data) < self.payload_len:
+				self.complete_frame = False
+				## Ok so, TODO:
+				#  This fucking code shouldn't need to be here...
+				#  I don't know WHY handler.poll() in core.py doesn't work as it should,
+				#  but it should return a fileno+event when there's more data to the payload.
+				#  But for whatever reason, handler.poll() returms empty even tho there's more data
+				#  to be collected for this websocket-packet.. and doing recv() again does actually
+				#  return more data - epoll() just don't know about it for some reason.
+				#  So the only way to do this, is to raise PacketIncomplete() and let outselves
+				#  trigger another recv() manually from within this parse-session.
+				#  The main issue with this tho, is that someone could send a fake length + not send data.
+				#  Effectively blocking this entire application.. I don't like this one bit..
+				#  But for now, fuck it, just keep the project going and we'll figure out why later!
+				#  (FAMOUSE LAST WORDS)
+				#raise PacketIncomplete("Incomplete packet.", (self.payload_len, len(self.carryOver)))
+			else:
+				self.complete_frame = True
+				if self.flags['fin']:
+					print('Got finished data')
+					#if self.fragmented:
+					#	self.fragmented = False # TODO: needed?
+					#else:
+					#	self.convert_to_json() # Also used internally for normal data
+					yield (Events.WS_CLIENT_COMPLETE_FRAME, self)
+				else:
+					print('Got unfinished data')
+					yield (Events.WS_CLIENT_INCOMPLETE_FRAME, self)
 
 class ws_packet():
 	def __init__(self, data, data_index=0, fragmented=None):
@@ -493,4 +732,3 @@ class server():
 						sockets[fileno]['socket'].parse()
 				else:
 					log('Fileno not in sockets?', level=5, origin='spiderWeb', function='ws_send')
-
