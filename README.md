@@ -6,11 +6,12 @@ WebSocket API engine
 ```python
 from spiderWeb import spiderWeb
 
-class parser():
-	def parse(self, client, data, headers, fileno, addr, *args, **kwargs):
-		yield {'status' : 'successful'}
+server = spiderWeb.host(address='', port=4001)
 
-server = spiderWeb.server({'default' : parser()}, address='', port=4001)
+@server.route_parser
+def parse(self, frame):
+	print('Got WebSocket frame:', frame.data)
+	yield {'status' : 'successful'}
 ```
 # Modules
 
