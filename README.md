@@ -1,6 +1,5 @@
 # slimWS
-WebSocket API engine.<br>
-Works best with [slimHTTP](https://github.com/Torxed/slimHTTP) although it does work all on its own. 
+A minimal WebSocket framework and works as a HTTP upgrader for [slimHTTP](https://github.com/Torxed/slimHTTP).<br>
 
 # Example usage
 
