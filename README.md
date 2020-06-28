@@ -1,13 +1,13 @@
-# spiderWeb
+# slimWS
 WebSocket API engine.<br>
 Works best with [slimHTTP](https://github.com/Torxed/slimHTTP) although it does work all on its own. 
 
 # Example usage
 
 ```python
-from spiderWeb import spiderWeb
+from slimWS import slimws
 
-server = spiderWeb.host(address='', port=4001)
+server = slimws.host(address='', port=4001)
 
 @server.route_parser
 def parse(self, frame):
