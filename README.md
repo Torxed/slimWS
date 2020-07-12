@@ -1,6 +1,18 @@
 # slimWS
-WebSocket API engine.<br>
-Works best with [slimHTTP](https://github.com/Torxed/slimHTTP) although it does work all on its own. 
+WebSocket framework writtein in Python.<br>
+Works standalone but is preferred as `@upgrader` for [slimHTTP](https://github.com/Torxed/slimHTTP). 
+
+# Installation
+
+### pypi
+
+    pip install slimWS
+
+### Git it to a project
+
+    git submodule add -b master https://github.com/Torxed/slimWS.git 
+
+*(Or just `git clone https://github.com/Torxed/slimWS.git`)*
 
 # Example usage
 
@@ -18,8 +30,3 @@ while 1:
 	for event, *event_data in server.poll():
 		pass
 ```
-# Modules
-
- * [jwt](https://github.com/Torxed/spiderWeb-jwt)
- * oauth2
- * slimAUTH
