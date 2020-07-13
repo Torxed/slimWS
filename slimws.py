@@ -93,25 +93,25 @@ def list_to_dict(_list_):
 		result[item] = b[index]
 	return result
 
-class WS_ROUTE():
+class WS_DECORATOR_MOCK_FUNC():
 	def __init__(self, route, func=None):
 		self.route = route
 		self.func = func
 
-	def router(self, f, *args, **kwargs):
+	def frame(self, f, *args, **kwargs):
 		self.func = f
 
 class WebSocket():
 	def __init__(self):
-		self.routes = {}
+		self.frame_handlers = {}
 		self.loaded_apis = {}
 
 	def log(self, *args, **kwargs):
 		print(' '.join([str(x) for x in args]))
 
-	def route(self, URL, *args, **kwargs):
-		self.routes[URL] = WS_ROUTE(URL)
-		return self.routes[URL].router
+	def frame(self, URL, *args, **kwargs):
+		self.frame_handlers[URL] = WS_DECORATOR_MOCK_FUNC(URL)
+		return self.frame_handlers[URL].frame
 
 	def WS_CLIENT_IDENTITY(self, request):
 		self.log=request.CLIENT_IDENTITY.server.log
@@ -151,13 +151,13 @@ class WebSocket():
 
 		return old_version, self.loaded_apis[f'{path}']
 
-	def route_parser_func(self, frame):
+	def frame_func(self, frame):
 		if type(frame.data) is not dict or '_module' not in frame.data:
-			self.log(f'Invalid request sent, missing _module in JSON data: {str(frame.data)[:200]}', source='WebSocket.route_parser_func(WS_FRAME)')
+			self.log(f'Invalid request sent, missing _module in JSON data: {str(frame.data)[:200]}', source='WebSocket.frame_func(WS_FRAME)')
 			return
 
-		if frame.data['_module'] in self.routes:
-			response = self.routes[frame.data['_module']].func(frame)
+		if frame.data['_module'] in self.frame_handlers:
+			response = self.frame_handlers[frame.data['_module']].func(frame)
 			yield (Events.WS_CLIENT_RESPONSE, response)
 		else:
 			## TODO: Add path security!
@@ -169,9 +169,9 @@ class WebSocket():
 
 					# Just keep track if we're executing the new code or the old, for logging purposes only
 					if not old_version:
-						self.log(f'Calling {handle}.parser.process(client, data, headers, fileno, addr, *args, **kwargs)', source='WebSocket.route_parser_func(WS_FRAME)')
+						self.log(f'Calling {handle}.parser.process(client, data, headers, fileno, addr, *args, **kwargs)', source='WebSocket.frame_func(WS_FRAME)')
 					else:
-						self.log(f'Calling old {handle}.parser.process(client, data, headers, fileno, addr, *args, **kwargs)', source='WebSocket.route_parser_func(WS_FRAME)')
+						self.log(f'Calling old {handle}.parser.process(client, data, headers, fileno, addr, *args, **kwargs)', source='WebSocket.frame_func(WS_FRAME)')
 
 					try:
 						response = modules[module_to_load].parser.process(frame)
@@ -192,7 +192,7 @@ class WebSocket():
 					except BaseException as e:
 						exc_type, exc_obj, exc_tb = sys.exc_info()
 						fname = path_split(exc_tb.tb_frame.f_code.co_filename)[1]
-						self.log(f'Module error in {fname}@{exc_tb.tb_lineno}: {e} ', source='WebSocket.route_parser_func(WS_FRAME)')
+						self.log(f'Module error in {fname}@{exc_tb.tb_lineno}: {e} ', source='WebSocket.frame_func(WS_FRAME)')
 						self.log(traceback.format_exc(), level=2, origin='pre_parser', function='parse')
 			else:
 				self.log(f'Invalid data, trying to load a inexisting module: {data["_module"]} ({str(data)[:200]})', level=3, origin='pre_parser', function='parse')	
@@ -201,7 +201,7 @@ class WebSocket():
 	def post_process_frame(self, frame):
 		try:
 			frame.data = loads(frame.data.decode('UTF-8'))
-			for event, state in self.route_parser_func(frame):
+			for event, state in self.frame_func(frame):
 				yield (event, state)
 		except UnicodeDecodeError:
 			self.log('[ERROR] UnicodeDecodeError:', frame.data, source='WebSocket.post_process_frame(WS_FRAME)')
