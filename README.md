@@ -1,4 +1,4 @@
-# slimWS
+# <img src="https://github.com/Torxed/slimHTTP/raw/master/docs/_static/slimWS.png" alt="drawing" width="200"/>
 WebSocket framework writtein in Python.<br>
 Works standalone but is preferred as `@upgrader` for [slimHTTP](https://github.com/Torxed/slimHTTP). 
 
@@ -26,8 +26,8 @@ from slimWS import slimws
 
 server = slimws.host(address='', port=4001)
 
-@server.route_parser
-def parse(self, frame):
+@server.frame
+def parse_frame(self, frame):
 	print('Got WebSocket frame:', frame.data)
 	yield {'status' : 'successful'}
 
