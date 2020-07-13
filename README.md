@@ -2,6 +2,9 @@
 WebSocket framework writtein in Python.<br>
 Works standalone but is preferred as `@upgrader` for [slimHTTP](https://github.com/Torxed/slimHTTP). 
 
+ * slimWS [documentation](https://slimws.readthedocs.io/en/latest)
+ * slimWS via slimHTTP's [discord](https://discord.gg/CMjZbwR) server
+
 # Installation
 
 ### pypi
@@ -14,7 +17,9 @@ Works standalone but is preferred as `@upgrader` for [slimHTTP](https://github.c
 
 *(Or just `git clone https://github.com/Torxed/slimWS.git`)*
 
-# Example usage
+# Usage
+
+Most examples will be found under the [documentation](https://slimws.readthedocs.io/en/latest), but here's a quick one.
 
 ```python
 from slimWS import slimws
