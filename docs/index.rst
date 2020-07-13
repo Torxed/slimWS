@@ -2,7 +2,7 @@ slimWS Documentation
 ======================
 
 WebSocket framework writtein in Python.<br>
-Works standalone but is preferred as `@upgrader`[1]_.
+Works standalone but is preferred as `@upgrader` [1]_.
 
 Some of the features of slimWS are:
 
