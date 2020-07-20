@@ -358,7 +358,7 @@ class WS_CLIENT_IDENTITY():
 		self.socket = request.CLIENT_IDENTITY.socket
 		self.fileno = request.CLIENT_IDENTITY.fileno
 		self.address = request.CLIENT_IDENTITY.address
-		self.keep_alive = request.CLIENT_IDENTITY.keep_alive
+		self.keep_alive = True #request.CLIENT_IDENTITY.keep_alive
 		self.buffer_size = 8192
 		self.closing = False
 
