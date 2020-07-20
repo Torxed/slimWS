@@ -342,7 +342,7 @@ class WebSocket():
 					sys.modules[import_id+'.py'] = imported
 
 				try:
-					with self.sys.modules[absolute_path] as module:
+					with self.sys.modules[module_to_load] as module:
 						# We have to re-check the @.route definition after the import, since it *might* have changed
 						# due to imports being allowed to do @.route('/', vhost=this)
 						#if self.vhost in frame.CLIENT_IDENTITY.server.routes and self.headers[b'URL'] in frame.CLIENT_IDENTITY.server.routes[self.vhost]:
