@@ -1,4 +1,4 @@
-import types, sys, traceback
+import types, sys, traceback, os
 from socket import *
 from base64 import b64encode
 from hashlib import sha1
@@ -200,7 +200,7 @@ class WebSocket():
 		self.log=request.CLIENT_IDENTITY.server.log
 		return WS_CLIENT_IDENTITY(request, server=self)
 
-	def find_final_module_path(path, frame):
+	def find_final_module_path(self, path, frame):
 		"""
 		Simply checks if a :class:`~slimWS.WS_FRAME`'s `_module` path exists.
 		If not, it returns `False`.
@@ -214,7 +214,7 @@ class WebSocket():
 		:rtype: str
 		"""
 		full_path = f"{path}/{frame.data['_module']}.py"
-		if isfile(full_path):
+		if os.path.isfile(full_path):
 			return full_path
 
 	def importer(path):
@@ -312,7 +312,7 @@ class WebSocket():
 						self.log(f'Module error in {fname}@{exc_tb.tb_lineno}: {e} ', source='WebSocket.frame_func(WS_FRAME)')
 						self.log(traceback.format_exc(), level=2, origin='pre_parser', function='parse')
 			else:
-				self.log(f'Invalid data, trying to load a inexisting module: {data["_module"]} ({str(data)[:200]})', level=3, origin='pre_parser', function='parse')	
+				self.log(f'Invalid data, trying to load a inexisting module: {frame.data["_module"]} ({str(frame.data)[:200]})')
 
 
 	def post_process_frame(self, frame):
@@ -358,7 +358,7 @@ class WS_CLIENT_IDENTITY():
 		self.socket = request.CLIENT_IDENTITY.socket
 		self.fileno = request.CLIENT_IDENTITY.fileno
 		self.address = request.CLIENT_IDENTITY.address
-		self.keep_alive = True #request.CLIENT_IDENTITY.keep_alive
+		self.keep_alive = request.CLIENT_IDENTITY.keep_alive
 		self.buffer_size = 8192
 		self.closing = False
 
