@@ -131,6 +131,9 @@ class WS_DECORATOR_MOCK_FUNC():
 	def frame(self, f, *args, **kwargs):
 		self.func = f
 
+class ModuleError(BaseException):
+	pass
+
 class Imported():
 	"""
 	A wrapper around absolute-path-imported via string modules.
