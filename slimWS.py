@@ -40,15 +40,15 @@ try:
 except:
 	if not 'LEVEL' in __builtins__: __builtins__['LEVEL'] = 1
 
-def log(*args, **kwargs):
-	"""
-	A stub function for log handling.
-	Currently doesn't do much fancy stuff other than print args.
-
-	:param *args: Any `str()` valid arguments are valid.
-	:type *args: Positional arguments.
-	"""
-	print(' '.join([str(x) for x in args]))
+#def log(*args, **kwargs):
+#	"""
+#	A stub function for log handling.
+#	Currently doesn't do much fancy stuff other than print args.
+#
+#	:param *args: Any `str()` valid arguments are valid.
+#	:type *args: Positional arguments.
+#	"""
+#	print(' '.join([str(x) for x in args]))
 
 class PacketIncomplete(Exception):
 	"""
@@ -642,7 +642,6 @@ class WS_FRAME():
 				self.data = None
 				return
 
-			print('Data:', self.data)
 			if len(self.data) < self.payload_len:
 				self.complete_frame = False
 				## Ok so, TODO:
@@ -662,7 +661,6 @@ class WS_FRAME():
 			else:
 				self.complete_frame = True
 				if self.flags['fin']:
-					print('Got finished data')
 					#if self.fragmented:
 					#	self.fragmented = False # TODO: needed?
 					#else:
@@ -673,7 +671,6 @@ class WS_FRAME():
 						#yield (Events.WS_CLIENT_ROUTING, )
 						yield subevent, entity
 				else:
-					print('Got unfinished data')
 					yield (Events.WS_CLIENT_INCOMPLETE_FRAME, self)
 
 """
