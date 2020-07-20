@@ -217,7 +217,7 @@ class WebSocket():
 		if os.path.isfile(full_path):
 			return full_path
 
-	def importer(path):
+	def importer(self, path):
 		"""
 		In charge of importing (and executing) `.py` modules.
 		Usually called upon when a module/api is being loaded.
@@ -280,7 +280,7 @@ class WebSocket():
 			## TODO: Actually test this out, because it hasn't been run even once.
 			module_to_load = self.find_final_module_path('./api_modules', frame)
 			if(module_to_load):
-				import_result = importer(module_to_load)
+				import_result = self.importer(module_to_load)
 				if import_result:
 					old_version, handle = import_result
 
