@@ -2,7 +2,7 @@ import types, sys, traceback, os
 import importlib.util
 from socket import *
 from base64 import b64encode
-from hashlib import sha1
+from hashlib import sha1, sha512
 from json import loads, dumps
 from struct import pack, unpack
 from datetime import date, datetime
@@ -131,6 +131,45 @@ class WS_DECORATOR_MOCK_FUNC():
 	def frame(self, f, *args, **kwargs):
 		self.func = f
 
+class Imported():
+	"""
+	A wrapper around absolute-path-imported via string modules.
+	Supports context wrapping to catch errors.
+	Will partially reload *most* of the code in the module in runtime.
+	Certain things won't get reloaded fully (this is a slippery dark slope)
+	"""
+	def __init__(self, server, path, import_id, spec, imported):
+		self.server = server
+		self.path = path
+		self.import_id = import_id # For lookups in virtual.sys.modules
+		self.spec = spec
+		self.imported = imported
+		self.instance = None
+
+	def __enter__(self, *args, **kwargs):
+		"""
+		It's important to know that it does cause a re-load of the module.
+		So any persistant stuff **needs** to be stowewd away.
+		Session files *(`pickle.dump()`)* is a good option, or god forbig `__builtin__['storage'] ...` is an option for in-memory stuff.
+		"""
+		try:
+			self.instance = self.spec.loader.exec_module(self.imported)
+		except Exception as e:
+			exc_type, exc_obj, exc_tb = sys.exc_info()
+			fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
+			self.server.log(f'Gracefully handled module error in {self.path}: {e}')
+			self.server.log(traceback.format_exc())
+			raise ModuleError(traceback.format_exc())
+		return self
+
+	def __exit__(self, *args, **kwargs):
+		# TODO: https://stackoverflow.com/questions/28157929/how-to-safely-handle-an-exception-inside-a-context-manager
+		if len(args) >= 2 and args[1]:
+			raise args[1]
+
+class _Sys():
+	modules = {}
+
 class WebSocket():
 	"""
 	A simpe API framework to make it a *little bit* easier to
@@ -150,7 +189,7 @@ class WebSocket():
 	"""
 	def __init__(self):
 		self.frame_handlers = {}
-		self.loaded_apis = {}
+		self.sys = _Sys()
 
 	def log(self, *args, **kwargs):
 		"""
@@ -216,7 +255,7 @@ class WebSocket():
 		"""
 		full_path = f"{path}/{frame.data['_module']}.py"
 		if os.path.isfile(full_path):
-			return full_path
+			return os.path.abspath(full_path)
 
 	def importer(self, path):
 		"""
@@ -230,6 +269,9 @@ class WebSocket():
 		:return: Returns if an old version was called, as well as the `spec` for the file.
 		:rtype: tuple
 		"""
+
+		
+
 		old_version = False
 		self.log(f'Request to import "{path}"', level=6, origin='importer')
 		if path not in self.loaded_apis:
@@ -251,6 +293,13 @@ class WebSocket():
 
 		return old_version, self.loaded_apis[f'{path}']
 
+	def uniqueue_id(self, seed_len=24):
+		"""
+		Generates a unique identifier in 2020.
+		TODO: Add a time as well, so we don't repeat the same 24 characters by accident.
+		"""
+		return sha512(os.urandom(seed_len)).hexdigest()
+
 	def frame_func(self, frame):
 		"""
 		The function called on when a processed frame should be parsed.
@@ -268,7 +317,7 @@ class WebSocket():
 		:rtype: iterator
 		"""
 		if type(frame.data) is not dict or '_module' not in frame.data:
-			self.log(f'Invalid request sent, missing _module in JSON data: {str(frame.data)[:200]}', source='WebSocket.frame_func(WS_FRAME)')
+			self.log(f'Invalid request sent, missing _module in JSON data: {str(frame.data)[:200]}')
 			return
 
 		# TODO: If empty, fallback to finding automatically.
@@ -281,37 +330,31 @@ class WebSocket():
 			## TODO: Actually test this out, because it hasn't been run even once.
 			module_to_load = self.find_final_module_path('./api_modules', frame)
 			if(module_to_load):
-				import_result = self.importer(module_to_load)
-				if import_result:
-					old_version, handle = import_result
+				if not module_to_load in self.sys.modules:
+					spec = importlib.util.spec_from_file_location(module_to_load, module_to_load)
+					imported = importlib.util.module_from_spec(spec)
+					
+					import_id = self.uniqueue_id()
+					self.sys.modules[module_to_load] = Imported(frame.CLIENT_IDENTITY.server, module_to_load, import_id, spec, imported)
+					sys.modules[import_id+'.py'] = imported
 
-					# Just keep track if we're executing the new code or the old, for logging purposes only
-					if not old_version:
-						self.log(f'Calling {handle}.parser.process(client, data, headers, fileno, addr, *args, **kwargs)', source='WebSocket.frame_func(WS_FRAME)')
-					else:
-						self.log(f'Calling old {handle}.parser.process(client, data, headers, fileno, addr, *args, **kwargs)', source='WebSocket.frame_func(WS_FRAME)')
+				try:
+					with self.sys.modules[absolute_path] as module:
+						# We have to re-check the @.route definition after the import, since it *might* have changed
+						# due to imports being allowed to do @.route('/', vhost=this)
+						#if self.vhost in frame.CLIENT_IDENTITY.server.routes and self.headers[b'URL'] in frame.CLIENT_IDENTITY.server.routes[self.vhost]:
+						#	yield (Events.CLIENT_URL_ROUTED, frame.CLIENT_IDENTITY.server.routes[self.vhost][self.headers[b'URL']].parser(self))
 
-					try:
-						response = self.loaded_apis[module_to_load].parser.process(frame)
-						if response:
-							if isinstance(response, Iterator):
-								for item in response:
-									yield {
-										**item,
-										'_uid' : data['_uid'] if '_uid' in data else None,
-										'_modules' : module_to_load['api_path']
-									}
-							else:
-								yield {
-									**response,
-									'_uid' : data['_uid'] if '_uid' in data else None,
-									'_modules' : module_to_load['api_path']
-								}
-					except BaseException as e:
-						exc_type, exc_obj, exc_tb = sys.exc_info()
-						fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
-						self.log(f'Module error in {fname}@{exc_tb.tb_lineno}: {e} ', source='WebSocket.frame_func(WS_FRAME)')
-						self.log(traceback.format_exc(), level=2, origin='pre_parser', function='parse')
+						elif hasattr(module.imported, 'on_request'):
+							yield (Events.CLIENT_RESPONSE_DATA, module.imported.on_request(self))
+				except ModuleError:
+					frame.CLIENT_IDENTITY.close()
+
+				except BaseException as e:
+					exc_type, exc_obj, exc_tb = sys.exc_info()
+					fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
+					self.log(f'Module error in {fname}@{exc_tb.tb_lineno}: {e} ')
+					self.log(traceback.format_exc(), level=2, origin='pre_parser', function='parse')
 			else:
 				self.log(f'Invalid data, trying to load a inexisting module: {frame.data["_module"]} ({str(frame.data)[:200]})')
 
@@ -332,12 +375,12 @@ class WebSocket():
 			for event, state in self.frame_func(frame):
 				yield (event, state)
 		except UnicodeDecodeError:
-			self.log('[ERROR] UnicodeDecodeError:', frame.data, source='WebSocket.post_process_frame(WS_FRAME)')
+			self.log('[ERROR] UnicodeDecodeError:', frame.data)
 			return None
 		except Exception as e:
 			exc_type, exc_obj, exc_tb = sys.exc_info()
 			fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
-			self.log(f'JSON error loading data {fname}@{exc_tb.tb_lineno}:', frame.data, source='WebSocket.post_process_frame(WS_FRAME)')
+			self.log(f'JSON error loading data {fname}@{exc_tb.tb_lineno}:', frame.data)
 			self.log(traceback.format_exc(), level=3)
 			return None
 
