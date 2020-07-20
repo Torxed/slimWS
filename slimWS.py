@@ -292,7 +292,7 @@ class WebSocket():
 						self.log(f'Calling old {handle}.parser.process(client, data, headers, fileno, addr, *args, **kwargs)', source='WebSocket.frame_func(WS_FRAME)')
 
 					try:
-						response = modules[module_to_load].parser.process(frame)
+						response = self.loaded_apis[module_to_load].parser.process(frame)
 						if response:
 							if isinstance(response, Iterator):
 								for item in response:
@@ -309,7 +309,7 @@ class WebSocket():
 								}
 					except BaseException as e:
 						exc_type, exc_obj, exc_tb = sys.exc_info()
-						fname = path_split(exc_tb.tb_frame.f_code.co_filename)[1]
+						fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
 						self.log(f'Module error in {fname}@{exc_tb.tb_lineno}: {e} ', source='WebSocket.frame_func(WS_FRAME)')
 						self.log(traceback.format_exc(), level=2, origin='pre_parser', function='parse')
 			else:
