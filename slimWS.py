@@ -349,14 +349,20 @@ class WebSocket():
 						#	yield (Events.CLIENT_URL_ROUTED, frame.CLIENT_IDENTITY.server.routes[self.vhost][self.headers[b'URL']].parser(self))
 
 						if hasattr(module.imported, 'on_request'):
-							yield (Events.CLIENT_RESPONSE_DATA, module.imported.on_request(self))
-				except ModuleError:
+							if (module_data := module.imported.on_request(frame)):
+								if isinstance(module_data, types.GeneratorType):
+									for data in module_data:
+										yield (Events.WS_CLIENT_RESPONSE, data)
+								else:
+									yield (Events.WS_CLIENT_RESPONSE, module_data)
+				except ModuleError as e:
+					self.log(f'Module error in {module_to_load}: {e}')
 					frame.CLIENT_IDENTITY.close()
 
 				except BaseException as e:
 					exc_type, exc_obj, exc_tb = sys.exc_info()
 					fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
-					self.log(f'Module error in {fname}@{exc_tb.tb_lineno}: {e} ')
+					self.log(f'Exception in {fname}@{exc_tb.tb_lineno}: {e} ')
 					self.log(traceback.format_exc(), level=2, origin='pre_parser', function='parse')
 			else:
 				self.log(f'Invalid data, trying to load a inexisting module: {frame.data["_module"]} ({str(frame.data)[:200]})')
@@ -493,9 +499,33 @@ class WS_CLIENT_IDENTITY():
 				return self.on_close(self)
 
 			self.buffer += d
-			yield (Events.WS_CLIENT_DATA, len(self.buffer))
+			yield (Events.CLIENT_DATA, len(self.buffer))
 
 	def send(self, data):
+		"""
+		A wrapper for the `socket` on :class:`~slimWS.WS_CLIENT_IDENTITY`.
+		It will however call `ws_send` instead which is a frame-builder for the
+		web socket protocol.
+
+		`send()` will however try to convert the data before passing it to `ws_send`.
+
+		.. warning:: `dict` objects will be converted with `json.dumps()` using :func:`~slimWS.json_serial`.
+
+		:param data: `bytes`, `json.dumps` or `str()` friendly objects.
+		:type data: bytes
+
+		:return: The length of the buffer that was actually sent
+		:rtype: int
+		"""
+		
+		if type(data) == dict:
+			data = dumps(data, default=json_serial)
+		if type(data) != bytes:
+			data = bytes(str(data), 'UTF-8')
+
+		return self.ws_send(data)
+
+	def ws_send(self, data, SPLIT=False):
 		"""
 		Sends any given `bytes` data to the socket of the :class:`~slimWS.WS_CLIENT_IDENTITY`.
 
@@ -505,7 +535,50 @@ class WS_CLIENT_IDENTITY():
 		:return: The length of the buffer that was actually sent
 		:rtype: int
 		"""
-		return self.socket.send(data)
+
+		#log('[Structuring a packet]', level=5, origin='spiderWeb', function='ws_send')
+
+		if SPLIT: data = [data[0+i:SPLIT+i] for i in range(0, len(data), SPLIT)] # Might get in trouble if splitting to 126 or 127. TODO: investigate.
+		else: data = [data]
+
+		for index, segment in enumerate(data):
+			packet = b''
+			## Add the flags + opcode (0 == continuation frame, 1 == text, 2 == binary, 8 == con close, 9 == ping, A == pong)
+			last_segment = True if index == len(data)-1 else False
+			fin, rsv1, rsv2, rsv3, opcode = (b'1' if last_segment else b'0'), b'0', b'0', b'0', bytes('{:0>4}'.format('1' if last_segment else '0'), 'UTF-8') # .... (....)
+			#log(b''.join([fin, rsv1, rsv2, rsv3, opcode]).decode('UTF-8'), level=5, origin='spiderWeb', function='ws_send')
+			packet += pack('B', int(b''.join([fin, rsv1, rsv2, rsv3, opcode]), 2))
+
+			mask = b'0'
+			if mask == b'1':
+				mask_key = b'\x00\x00\x00\x00' # We can also use b'' and mask 0. But it'll work the same.
+				for index, c in enumerate(segment):
+					pass # Do something with the data.
+			else:
+				mask_key = b''
+			payload_len = len(segment)
+			extended_len = 0
+
+			if payload_len > 65535: # If the len() is larger than a 2 byte INT
+				extended_len = pack('!Q', payload_len)
+				payload_len = pack('B', int(b''.join([mask, bytes('{0:0>7b}'.format(127), 'UTF-8')]),2))
+
+			elif payload_len >= 126: # 2 bytes INT
+				extended_len = pack('!H', payload_len)
+				#log(b'[Mask]:'.join([mask, bytes('{0:0>7b}'.format(126), 'UTF-8')]), level=5, origin='spiderWeb', function='ws_send')
+				payload_len = pack('B', int(b''.join([mask, bytes('{0:0>7b}'.format(126), 'UTF-8')]),2))
+			else:
+				extended_len = b''
+				#log(b''.join([mask, bytes('{0:0>7b}'.format(payload_len), 'UTF-8')]).decode('UTF-8'), end=' ', level=5, origin='spiderWeb', function='ws_send')
+				payload_len = pack('B', int(b''.join([mask, bytes('{0:0>7b}'.format(payload_len), 'UTF-8')]),2))
+
+			# Payload len is padded with mask
+			packet += payload_len + extended_len + mask_key + segment
+			#log('[Flags::Data]:', {'fin': fin, 'rsv1': rsv1, 'rsv2': rsv2, 'rsv3': rsv3, 'mask': True if mask == b'1' else False, 'opcode':opcode, 'len' : len(segment), 'mask_key' : mask_key}, segment, level=10, origin='spiderWeb', function='ws_send')
+
+			#log(data.decode('UTF-8'), origin='spiderWeb', function='ws_send')
+			#log('[Final::Data]:', packet, level=10, origin='spiderWeb', function='ws_send')
+			self.socket.send(packet)
 
 	def build_request(self):
 		"""
@@ -538,6 +611,9 @@ class WS_FRAME():
 	"""
 	def __init__(self, CLIENT_IDENTITY):
 		self.CLIENT_IDENTITY = CLIENT_IDENTITY
+
+	def build_request(self):
+		yield (Events.CLIENT_REQUEST, self)
 
 	def parse(self):
 		"""
@@ -572,8 +648,8 @@ class WS_FRAME():
 		self.data = b''
 		self.raw_data = self.CLIENT_IDENTITY.buffer
 		#self.carryOver = b''
-		self.CLIENT_IDENTITY.server.log('Flags:', self.flags, level=10, origin='spiderWeb', function='ws_packet')
-		self.CLIENT_IDENTITY.server.log('opcode:', self.opcode, level=10, origin='spiderWeb', function='ws_packet')
+		#self.CLIENT_IDENTITY.server.log('Flags:', self.flags, level=10, origin='spiderWeb', function='ws_packet')
+		#self.CLIENT_IDENTITY.server.log('opcode:', self.opcode, level=10, origin='spiderWeb', function='ws_packet')
 		
 		## == We skip the first 0 index because data[index 0] is the [fin,rsv1,rsv2,rsv3,opcode] byte.
 		self.data_index += 1
@@ -600,8 +676,8 @@ class WS_FRAME():
 		##          (for instance, recv(1024) might get the header, but not the full length)
 
 		## == CONDITION 1: The length is less than 126 - Which means whatever length this is, is the actual payload length.
-		if self.payload_len < 126:
-			self.CLIENT_IDENTITY.server.log('Len:', self.payload_len, level=10, origin='spiderWeb', function='ws_packet')
+		#if self.payload_len < 126:
+		#	self.CLIENT_IDENTITY.server.log('Len:', self.payload_len, level=10, origin='spiderWeb', function='ws_packet')
 
 		## == CONDITION 2: Length is 126, which means the next [2 bytes] are the length.
 		elif self.payload_len == 126 and len(self.raw_data) >= self.data_index+2:
@@ -623,15 +699,15 @@ class WS_FRAME():
 		if self.flags['mask'] and len(self.raw_data) >= self.data_index+4:
 			#mask_key = unpack('I', ws[parsed_index:parsed_index+4])[0]
 			self.mask_key = self.raw_data[self.data_index:self.data_index+4]
-			self.CLIENT_IDENTITY.server.log('Mask key:', self.mask_key, level=10, origin='spiderWeb', function='ws_packet')
+			#self.CLIENT_IDENTITY.server.log('Mask key:', self.mask_key, level=10, origin='spiderWeb', function='ws_packet')
 			self.data_index += 4
 
 		if self.flags['mask']:
 			self.data = b''
-			self.CLIENT_IDENTITY.server.log('[XOR::Data]:', self.raw_data[self.data_index:self.data_index+self.payload_len], level=10, origin='spiderWeb', function='ws_packet')
+			#self.CLIENT_IDENTITY.server.log('[XOR::Data]:', self.raw_data[self.data_index:self.data_index+self.payload_len], level=10, origin='spiderWeb', function='ws_packet')
 			for index, c in enumerate(self.raw_data[self.data_index:self.data_index+self.payload_len]):
 				self.data += bytes([c ^ self.mask_key[(index%4)]])
-			self.CLIENT_IDENTITY.server.log('[   ::Data]:', self.data, level=9, origin='spiderWeb', function='ws_packet')
+			#self.CLIENT_IDENTITY.server.log('[   ::Data]:', self.data, level=9, origin='spiderWeb', function='ws_packet')
 			self.data_index += self.payload_len
 
 			self.CLIENT_IDENTITY.buffer = self.CLIENT_IDENTITY.buffer[self.data_index:]
