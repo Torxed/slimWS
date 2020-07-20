@@ -1,4 +1,5 @@
 import types, sys, traceback, os
+import importlib.util
 from socket import *
 from base64 import b64encode
 from hashlib import sha1
