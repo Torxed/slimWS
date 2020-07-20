@@ -345,7 +345,7 @@ class WebSocket():
 						#if self.vhost in frame.CLIENT_IDENTITY.server.routes and self.headers[b'URL'] in frame.CLIENT_IDENTITY.server.routes[self.vhost]:
 						#	yield (Events.CLIENT_URL_ROUTED, frame.CLIENT_IDENTITY.server.routes[self.vhost][self.headers[b'URL']].parser(self))
 
-						elif hasattr(module.imported, 'on_request'):
+						if hasattr(module.imported, 'on_request'):
 							yield (Events.CLIENT_RESPONSE_DATA, module.imported.on_request(self))
 				except ModuleError:
 					frame.CLIENT_IDENTITY.close()
