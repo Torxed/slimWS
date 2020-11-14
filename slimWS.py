@@ -93,6 +93,10 @@ class Events():
 
 	NOT_YET_IMPLEMENTED = 0b00000000
 
+	def convert(_int):
+		def_map = {v: k for k, v in Events.__dict__.items() if not k.startswith('__') and k != 'convert'}
+		return def_map[_int] if _int in def_map else None
+
 def json_serial(obj):
 	"""
 	A helper function to being able to `json.dumps()` most things.
@@ -205,7 +209,7 @@ class WebSocket():
 		"""
 		print(' '.join([str(x) for x in args]))
 
-	def frame(self, URL=None, *args, **kwargs):
+	def frame(self, *args, **kwargs):
 		"""
 		A `decorator` function used to re-route the default
 		frame parser into something user specific.
@@ -222,8 +226,9 @@ class WebSocket():
 		:return: Returns a decorator mock function
 		:rtype: slimWS.WS_DECORATOR_MOCK_FUNC.frame
 		"""
-		self.frame_handlers[URL] = WS_DECORATOR_MOCK_FUNC(URL)
-		return self.frame_handlers[URL].frame
+		self.frame_func = args[0]
+		#self.frame_handlers[URL] = WS_DECORATOR_MOCK_FUNC(URL)
+		#return self.frame_handlers[URL].frame
 
 	def WS_CLIENT_IDENTITY(self, request):
 		"""
@@ -381,8 +386,15 @@ class WebSocket():
 		"""
 		try:
 			frame.data = loads(frame.data.decode('UTF-8'))
-			for event, state in self.frame_func(frame):
-				yield (event, state)
+			for data in self.frame_func(frame):
+				if type(data) == dict:
+					try:
+						data = json.dumps(data)
+					except:
+						data = str(data)
+				if type(data) == str:
+					data = bytes(data, 'UTF-8')
+				yield (Events.WS_CLIENT_RESPONSE, data)
 		except UnicodeDecodeError:
 			self.log('[ERROR] UnicodeDecodeError:', frame.data)
 			return None
@@ -517,7 +529,7 @@ class WS_CLIENT_IDENTITY():
 		:return: The length of the buffer that was actually sent
 		:rtype: int
 		"""
-		
+
 		if type(data) == dict:
 			data = dumps(data, default=json_serial)
 		if type(data) != bytes:
@@ -744,7 +756,6 @@ class WS_FRAME():
 					yield (Events.WS_CLIENT_COMPLETE_FRAME, self)
 
 					for subevent, entity in self.CLIENT_IDENTITY.server.post_process_frame(self):
-						#yield (Events.WS_CLIENT_ROUTING, )
 						yield subevent, entity
 				else:
 					yield (Events.WS_CLIENT_INCOMPLETE_FRAME, self)
