@@ -1,9 +1,9 @@
 import types, sys, traceback, os
 import importlib.util
+import json
 from socket import *
 from base64 import b64encode
 from hashlib import sha1, sha512
-from json import loads, dumps
 from struct import pack, unpack
 from datetime import date, datetime
 try:
@@ -385,12 +385,13 @@ class WebSocket():
 		:rtype: iterator
 		"""
 		try:
-			frame.data = loads(frame.data.decode('UTF-8'))
+			frame.data = json.loads(frame.data.decode('UTF-8'))
 			for data in self.frame_func(frame):
 				if type(data) == dict:
 					try:
 						data = json.dumps(data)
-					except:
+					except Exception as e:
+						print('Could not dump JSON:', e)
 						data = str(data)
 				if type(data) == str:
 					data = bytes(data, 'UTF-8')
@@ -531,7 +532,7 @@ class WS_CLIENT_IDENTITY():
 		"""
 
 		if type(data) == dict:
-			data = dumps(data, default=json_serial)
+			data = json.dumps(data, default=json_serial)
 		if type(data) != bytes:
 			data = bytes(str(data), 'UTF-8')
 
