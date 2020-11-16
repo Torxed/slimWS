@@ -1,10 +1,10 @@
 import types, sys, traceback, os
 import importlib.util
 import json
+import struct
 from socket import *
 from base64 import b64encode
 from hashlib import sha1, sha512
-from struct import pack, unpack
 from datetime import date, datetime
 try:
 	from select import epoll, EPOLLIN
@@ -560,7 +560,7 @@ class WS_CLIENT_IDENTITY():
 			last_segment = True if index == len(data)-1 else False
 			fin, rsv1, rsv2, rsv3, opcode = (b'1' if last_segment else b'0'), b'0', b'0', b'0', bytes('{:0>4}'.format('1' if last_segment else '0'), 'UTF-8') # .... (....)
 			#log(b''.join([fin, rsv1, rsv2, rsv3, opcode]).decode('UTF-8'), level=5, origin='spiderWeb', function='ws_send')
-			packet += pack('B', int(b''.join([fin, rsv1, rsv2, rsv3, opcode]), 2))
+			packet += struct.pack('B', int(b''.join([fin, rsv1, rsv2, rsv3, opcode]), 2))
 
 			mask = b'0'
 			if mask == b'1':
@@ -573,17 +573,17 @@ class WS_CLIENT_IDENTITY():
 			extended_len = 0
 
 			if payload_len > 65535: # If the len() is larger than a 2 byte INT
-				extended_len = pack('!Q', payload_len)
-				payload_len = pack('B', int(b''.join([mask, bytes('{0:0>7b}'.format(127), 'UTF-8')]),2))
+				extended_len = struct.pack('!Q', payload_len)
+				payload_len = struct.pack('B', int(b''.join([mask, bytes('{0:0>7b}'.format(127), 'UTF-8')]),2))
 
 			elif payload_len >= 126: # 2 bytes INT
-				extended_len = pack('!H', payload_len)
+				extended_len = struct.pack('!H', payload_len)
 				#log(b'[Mask]:'.join([mask, bytes('{0:0>7b}'.format(126), 'UTF-8')]), level=5, origin='spiderWeb', function='ws_send')
-				payload_len = pack('B', int(b''.join([mask, bytes('{0:0>7b}'.format(126), 'UTF-8')]),2))
+				payload_len = struct.pack('B', int(b''.join([mask, bytes('{0:0>7b}'.format(126), 'UTF-8')]),2))
 			else:
 				extended_len = b''
 				#log(b''.join([mask, bytes('{0:0>7b}'.format(payload_len), 'UTF-8')]).decode('UTF-8'), end=' ', level=5, origin='spiderWeb', function='ws_send')
-				payload_len = pack('B', int(b''.join([mask, bytes('{0:0>7b}'.format(payload_len), 'UTF-8')]),2))
+				payload_len = struct.pack('B', int(b''.join([mask, bytes('{0:0>7b}'.format(payload_len), 'UTF-8')]),2))
 
 			# Payload len is padded with mask
 			packet += payload_len + extended_len + mask_key + segment
@@ -637,101 +637,42 @@ class WS_FRAME():
 		:rtype: iterator
 		"""
 
-		## == Some initial checks, to see if we got all the data, the opcode etc.
-		self.data_index = 0
-		flags = '{0:0>8b}'.format(unpack('B', bytes([self.CLIENT_IDENTITY.buffer[self.data_index]]))[0])
-		fin, rsv1, rsv2, rsv3 = [True if x == '1' else False for x in flags[0:4]]
-		opcode = int(flags[4:8], 2)
+		flag_bits = self.CLIENT_IDENTITY.buffer[0]
+		mask_and_len = self.CLIENT_IDENTITY.buffer[1]
 
-		self.flags = {'fin' : fin, 'rsv1' : rsv1, 'rsv2' : rsv2, 'rsv3' : rsv3, 'mask' : None}
-		self.opcode = opcode
-		
-		#if fragmented in (None, 0, False):
-		#	if self.opcode != 0 and not self.flags['fin']:
-		#		self.fragmented = True
-		#	elif self.flags['fin']:
-		#		self.fragmented = False
-		#else:
-		#	self.fragmented = fragmented
+		assert bool(flag_bits & 0b00000001) # Make sure we're reading Opcode: Text (1)
 
-		self.complete_frame = False
+		self.flags = {}
+		self.flags['fin'] = bool(flag_bits & 0b10000000)
+		self.flags['mask'] = bool(mask_and_len & 0b10000000)
+		self.flags['payload_length'] = mask_and_len & 0b01111111
 
-		self.payload_len = 0
-		self.mask_key = None
-		self.data = b''
-		self.raw_data = self.CLIENT_IDENTITY.buffer
-		#self.carryOver = b''
-		#self.CLIENT_IDENTITY.server.log('Flags:', self.flags, level=10, origin='spiderWeb', function='ws_packet')
-		#self.CLIENT_IDENTITY.server.log('opcode:', self.opcode, level=10, origin='spiderWeb', function='ws_packet')
-		
-		## == We skip the first 0 index because data[index 0] is the [fin,rsv1,rsv2,rsv3,opcode] byte.
-		self.data_index += 1
-
-		## ------- Begin parsing
-
-		if len(self.raw_data) >= 2 and self.payload_len == 0:
-			## == Check the initial length of the payload.
-			##    Websockets have 3 conditional payload lengths:
-			##	  * https://stackoverflow.com/questions/18271598/how-to-work-out-payload-size-from-html5-websocket
-			self.payload_len = unpack('B', bytes([self.raw_data[self.data_index]]))[0]
-			self.payload_len = '{0:0>8b}'.format(self.payload_len)
-
-			self.flags['mask'], self.payload_len = (True if self.payload_len[0] == '1' else False), int('{:0>8}'.format(self.payload_len[1:]), 2)
-			self.data_index += 1
-
-		# B = 1
-		# H = 2
-		# I = 4
-		# Q = 8
-
-		## == TODO: When we've successfully established the payload length,
-		##          make sure we actually have recieved that much data.
-		##          (for instance, recv(1024) might get the header, but not the full length)
-
-		## == CONDITION 1: The length is less than 126 - Which means whatever length this is, is the actual payload length.
-		#if self.payload_len < 126:
-		#	self.CLIENT_IDENTITY.server.log('Len:', self.payload_len, level=10, origin='spiderWeb', function='ws_packet')
-
-		## == CONDITION 2: Length is 126, which means the next [2 bytes] are the length.
-		elif self.payload_len == 126 and len(self.raw_data) >= self.data_index+2:
-			self.payload_len = unpack('>H', self.raw_data[self.data_index:self.data_index+2])[0]
-			self.data_index += 2
-			self.CLIENT_IDENTITY.server.log('Large payload:', self.payload_len, level=10, origin='spiderWeb', function='ws_packet')
-
-		## == Condition 3: Length is 127, which means the next [8] bytes are the length.
-		elif self.payload_len == 127 and len(self.raw_data) >= self.data_index+2:
-			self.payload_len = unpack('>Q', self.raw_data[self.data_index:self.data_index+8])[0]
-			self.data_index += 8
-			self.CLIENT_IDENTITY.server.log('Huge payload:', self.payload_len, level=10, origin='spiderWeb', function='ws_packet')
-
-		if len(self.raw_data) < self.payload_len:
-			self.complete_frame = False
-			return
-
-		## == We try to see if the package is XOR:ed (mask=True) and data length is larger than 4.
-		if self.flags['mask'] and len(self.raw_data) >= self.data_index+4:
-			#mask_key = unpack('I', ws[parsed_index:parsed_index+4])[0]
-			self.mask_key = self.raw_data[self.data_index:self.data_index+4]
-			#self.CLIENT_IDENTITY.server.log('Mask key:', self.mask_key, level=10, origin='spiderWeb', function='ws_packet')
-			self.data_index += 4
+		if self.flags['payload_length'] < 126:
+			self.mask_key = self.CLIENT_IDENTITY.buffer[2:6]
+			payload = self.CLIENT_IDENTITY.buffer[6:6+self.flags['payload_length']]
+			self.CLIENT_IDENTITY.buffer = self.CLIENT_IDENTITY.buffer[6+self.flags['payload_length']:]
+		elif self.flags['payload_length'] == 126:
+			self.flags['payload_length'] = struct.unpack('>H', self.CLIENT_IDENTITY.buffer[2:4])[0]
+			self.mask_key = self.CLIENT_IDENTITY.buffer[4:8]
+			payload = self.CLIENT_IDENTITY.buffer[8:8+self.flags['payload_length']]
+			self.CLIENT_IDENTITY.buffer = self.CLIENT_IDENTITY.buffer[8+self.flags['payload_length']:]
+		elif self.flags['payload_length'] == 127:
+			self.flags['payload_length'] = struct.unpack('>Q', self.CLIENT_IDENTITY.buffer[2:10])[0]
+			self.mask_key = self.CLIENT_IDENTITY.buffer[10:14]
+			payload = self.CLIENT_IDENTITY.buffer[14:14+self.flags['payload_length']]
+			self.CLIENT_IDENTITY.buffer = self.CLIENT_IDENTITY.buffer[14+self.flags['payload_length']:]
 
 		if self.flags['mask']:
 			self.data = b''
-			#self.CLIENT_IDENTITY.server.log('[XOR::Data]:', self.raw_data[self.data_index:self.data_index+self.payload_len], level=10, origin='spiderWeb', function='ws_packet')
-			for index, c in enumerate(self.raw_data[self.data_index:self.data_index+self.payload_len]):
+			for index, c in enumerate(payload):
 				self.data += bytes([c ^ self.mask_key[(index%4)]])
-			#self.CLIENT_IDENTITY.server.log('[   ::Data]:', self.data, level=9, origin='spiderWeb', function='ws_packet')
-			self.data_index += self.payload_len
-
-			self.CLIENT_IDENTITY.buffer = self.CLIENT_IDENTITY.buffer[self.data_index:]
-
 
 			if self.data == b'PING':
 				#self.ws_send(b'Pong') #?
 				self.data = None
 				return
 
-			if len(self.data) < self.payload_len:
+			if len(self.data) < self.flags['payload_length']:
 				self.complete_frame = False
 				## Ok so, TODO:
 				#  This fucking code shouldn't need to be here...
@@ -746,7 +687,7 @@ class WS_FRAME():
 				#  Effectively blocking this entire application.. I don't like this one bit..
 				#  But for now, fuck it, just keep the project going and we'll figure out why later!
 				#  (FAMOUSE LAST WORDS)
-				#raise PacketIncomplete("Incomplete packet.", (self.payload_len, len(self.carryOver)))
+				#raise PacketIncomplete("Incomplete packet.", (self.flags['payload_length'], len(self.carryOver)))
 			else:
 				self.complete_frame = True
 				if self.flags['fin']:
@@ -760,50 +701,3 @@ class WS_FRAME():
 						yield subevent, entity
 				else:
 					yield (Events.WS_CLIENT_INCOMPLETE_FRAME, self)
-
-"""
-class server():
-	#x = ws_client(None, None, b'\x81\xfe\x00\xd2\xa9\xbc\xc6\n\xd2\x9e\xb5o\xd8\xc9\xa3d\xca\xd9\x99d\xdb\x9e\xfc(\x9f\xd9\xa5>\x9a\xd8\xa7>\x98\x85\xa5n\xcc\xda\xf1<\xcc\xda\xfe2\x9d\x8d\xa4o\xca\x8f\xf1?\x99\x88\xf2i\xcb\x84\xf3=\x9a\x8e\xf79\x9a\x8c\xf0h\x9e\x85\xf0;\xcc\x84\xa4k\x90\xdd\xf6n\x99\x8c\xa79\xcc\x85\xf0i\x8b\x90\xe4e\xd9\xd9\xb4k\xdd\xd5\xa9d\x8b\x86\xe4{\xdc\xd9\xb4s\x8b\x90\xe4e\xcb\xd6\xa3i\xdd\x9e\xfc(\x84\x91\xa7f\xc5\xcc\xaak\xd0\xd9\xb4y\x84\x91\xe4&\x8b\xdd\xa5i\xcc\xcf\xb5U\xdd\xd3\xado\xc7\x9e\xfc(\xc8\x8b\xf6<\xca\xdf\xa52\x99\x8c\xf6k\xcf\x8c\xfe9\xca\x8d\xa29\xcf\x85\xf48\xcf\xd9\xa2i\x9b\x89\xa0n\x9e\x8f\xf2l\x9e\x8b\xa3?\x9b\x85\xf62\x9f\xd9\xf6l\xcf\x8c\xff=\x91\x88\xa7l\x9a\x8d\xf6l\x9c\x8d\xa2h\x8b\xc1\x81\xfe\x01\'\x90\n\x96i\xeb(\xe5\x0c\xe1\x7f\xf3\x07\xf3o\xc9\x07\xe2(\xacK\xa6o\xf5]\xa3n\xf7]\xa13\xf5\r\xf5l\xa1_\xf5l\xaeQ\xa4;\xf4\x0c\xf39\xa1\\\xa0>\xa2\n\xf22\xa3^\xa38\xa7Z\xa3:\xa0\x0b\xa73\xa0X\xf52\xf4\x08\xa9k\xa6\r\xa0:\xf7Z\xf53\xa0\n\xb2&\xb4\x06\xe0o\xe4\x08\xe4c\xf9\x07\xb20\xb4\x18\xe5o\xe4\x10\xb2&\xb4\x06\xf2`\xf3\n\xe4(\xacK\xf3b\xf7\x1d\xb2&\xb4\x08\xe3y\xf3\x1d\xb20\xb4\x1b\xffe\xfb6\xfcc\xe5\x1d\xb2&\xb4\x06\xe7d\xf3\x1b\xb20\xb4\n\xa1k\xf3Z\xa72\xf0\x08\xf39\xa0X\xa0k\xf0X\xf6o\xa7Q\xf4;\xa6Z\xa82\xaf[\xf32\xa1]\xf5?\xa6]\xa7i\xf7\x0f\xa9k\xa3Z\xa3:\xae[\xf6i\xa3]\xa2h\xa4\x0c\xa28\xf7^\xa08\xa5K\xbc(\xf7\n\xf3o\xe5\x1a\xcf~\xf9\x02\xf5d\xb4S\xb2k\xa1Y\xa6i\xf5\n\xa8:\xa6Y\xf1l\xa6Q\xa3i\xa7\r\xa3l\xaf[\xa2l\xf3\r\xf38\xa3\x0f\xf4=\xa5]\xf6=\xa1\x0c\xa58\xafY\xa8<\xf3Y\xf6l\xa6P\xa72\xa2\x08\xf69\xa7Y\xf6?\xa7\r\xf2(\xeb\x81\xfe\x01*7\x11Z\xeeL3)\x8bFd?\x80Tt\x05\x80E3`\xcc\x01t9\xda\x04u;\xda\x06(9\x8aRwm\xd8Rwb\xd6\x03 8\x8bT"m\xdb\x07%n\x8dU)o\xd9\x04#k\xdd\x04!l\x8c\x00(l\xdfR)8\x8f\x0epj\x8a\x07!;\xddR(l\x8d\x15=x\x81Gt(\x8fCx5\x80\x15+x\x9fBt(\x97\x15=x\x81U{?\x8dC3`\xccCt;\x83Gc5\x88^}?\x9d\x15=x\x8fDb?\x9a\x15+x\x9eBs=\xcc\x1b3;\x8dTt)\x9dhe5\x85R\x7fx\xd4\x15pm\xde\x01r9\x8d\x0f!j\xdeVwj\xd6\x04rk\x8a\x04wc\xdc\x05w?\x8aT#o\x88S&i\xdaQ&m\x8b\x02#c\xde\x0f\'?\xdeQwj\xd7\x00)n\x8fQ"k\xdeQ$k\x8aU3v\xccXf4\x8bE3`\xccT ;\x8b\x04&b\x88Vri\xd8\x06!;\x88\x06w?\xdf\x0fuk\xde\x04)b\xd7\x05rb\xd9\x03to\xde\x03&9\x8fQ(;\xdb\x04"j\xd6\x05w9\xdb\x03#8\xdcR#h\x8f\x00!h\xdd\x15l')
-	#x.parse()
-	#exit(1)
-	def __init__(self, parsers, address='127.0.0.1', port=1337):
-		self.s = socket()
-		self.s.setsockopt(SOL_SOCKET, SO_REUSEADDR, 1)
-
-		self.s.bind((address, port))
-		self.s.listen(4)
-
-		lookup = {self.s.fileno():'#Server'}
-		poller = epoll()
-		poller.register(self.s.fileno(), EPOLLIN)
-		self.parsers = parsers
-
-		if not 'sockets' in __builtins__ or ('__dict__' in __builtins__ and not 'sockets' in __builtins__.__dict__):
-			try:
-				__builtins__.__dict__['sockets'] = {}
-				__builtins__.__dict__['io'] = {}
-			except:
-				__builtins__['sockets'] = {}
-				__builtins__['io'] = {}
-
-		while 1:
-			for fileno, eventID in poller.poll(0.001):
-				#log('\nSock event:', translation_table[eventID] if eventID in translation_table else eventID, lookup[fileno] if fileno in lookup else fileno, level=5, origin='spiderWeb', function='ws_send')
-				if fileno == self.s.fileno():
-					ns, na = self.s.accept()
-					poller.register(ns.fileno(), EPOLLIN)
-					sockets[ns.fileno()] = {'socket' : ws_client(ns, na, parsers=self.parsers), 'user' : None, 'domain' : None}
-					lookup[ns.fileno()] = na
-
-				elif fileno in sockets:
-					if sockets[fileno]['socket'].closed:
-						log('#Closing fileno:', fileno, level=5, origin='spiderWeb', function='ws_send')
-						poller.unregister(fileno)
-						del sockets[fileno]
-						del lookup[fileno]
-					else:
-						sockets[fileno]['socket'].recv()
-						sockets[fileno]['socket'].parse()
-				else:
-					log('Fileno not in sockets?', level=5, origin='spiderWeb', function='ws_send')
-"""
