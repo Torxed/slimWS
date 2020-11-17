@@ -640,7 +640,15 @@ class WS_FRAME():
 		flag_bits = self.CLIENT_IDENTITY.buffer[0]
 		mask_and_len = self.CLIENT_IDENTITY.buffer[1]
 
-		assert bool(flag_bits & 0b00000001) # Make sure we're reading Opcode: Text (1)
+		# Make sure we're reading Opcode: Text (1)
+		# Or that we got Opcode: Connection Close (8)
+		try:
+			assert bool(flag_bits & 0b00000001) or \
+					bool(flag_bits & 0b00001000)
+		except:
+			self.CLIENT_IDENTITY.buffer = b''
+			self.data = None
+			return None
 
 		self.flags = {}
 		self.flags['fin'] = bool(flag_bits & 0b10000000)
@@ -662,10 +670,15 @@ class WS_FRAME():
 			payload = self.CLIENT_IDENTITY.buffer[14:14+self.flags['payload_length']]
 			self.CLIENT_IDENTITY.buffer = self.CLIENT_IDENTITY.buffer[14+self.flags['payload_length']:]
 
+		if bool(flag_bits & 0b00001000):
+			self.data = None
+			return None
+
 		if self.flags['mask']:
 			self.data = b''
 			for index, c in enumerate(payload):
 				self.data += bytes([c ^ self.mask_key[(index%4)]])
+
 
 			if self.data == b'PING':
 				#self.ws_send(b'Pong') #?
