@@ -35,20 +35,7 @@ except:
 			except OSError:
 				return []
 
-try:
-	if not 'LEVEL' in __builtins__.__dict__: __builtins__.__dict__['LEVEL'] = 1
-except:
-	if not 'LEVEL' in __builtins__: __builtins__['LEVEL'] = 1
-
-#def log(*args, **kwargs):
-#	"""
-#	A stub function for log handling.
-#	Currently doesn't do much fancy stuff other than print args.
-#
-#	:param *args: Any `str()` valid arguments are valid.
-#	:type *args: Positional arguments.
-#	"""
-#	print(' '.join([str(x) for x in args]))
+storage = {}
 
 class PacketIncomplete(Exception):
 	"""
@@ -402,7 +389,7 @@ class WebSocket():
 		except Exception as e:
 			exc_type, exc_obj, exc_tb = sys.exc_info()
 			fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
-			self.log(f'JSON error loading data {fname}@{exc_tb.tb_lineno}:', frame.data)
+			self.log(f'Error in post processing frame {fname}@{exc_tb.tb_lineno}:', frame.data)
 			self.log(traceback.format_exc(), level=3)
 			return None
 
@@ -431,6 +418,13 @@ class WS_CLIENT_IDENTITY():
 		self.buffer = request.CLIENT_IDENTITY.buffer # Take over the buffer
 		self.on_close = request.CLIENT_IDENTITY.on_close
 
+		self.virtual_host = None
+		if b'host' in request.headers:
+			try:
+				self.virtual_host = request.headers[b'host'].decode('UTF-8')
+			except:
+				pass
+
 	def upgrade(self, request):
 		"""
 		A function which can be called to upgrade a `X_CLIENT_IDENTITY` to a
@@ -449,6 +443,12 @@ class WS_CLIENT_IDENTITY():
 		"""
 		self.server.log(f'Performing upgrade() response for: {self}', level=5, source='WS_CLIENT_IDENTITY.upgrade()')
 		self.keep_alive = True
+
+		if b'host' in request.headers:
+			try:
+				self.virtual_host = request.headers[b'host'].decode('UTF-8')
+			except:
+				pass
 
 		magic_key = request.headers[b'sec-websocket-key'] + b'258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
 		magic_hash = sha1(magic_key).digest()
@@ -536,7 +536,10 @@ class WS_CLIENT_IDENTITY():
 		if type(data) != bytes:
 			data = bytes(str(data), 'UTF-8')
 
-		return self.ws_send(data)
+		try:
+			return self.ws_send(data)
+		except:
+			return 0
 
 	def ws_send(self, data, SPLIT=False):
 		"""
@@ -611,7 +614,7 @@ class WS_CLIENT_IDENTITY():
 		return True if len(self.buffer) else False
 
 	def __repr__(self):
-		return f'<spiderWeb.WS_CLIENT_IDENTITY @ {self.address}>'
+		return f'<slimWS.WS_CLIENT_IDENTITY @ {self.address}>'
 
 class WS_FRAME():
 	"""
@@ -646,6 +649,7 @@ class WS_FRAME():
 			assert bool(flag_bits & 0b00000001) or \
 					bool(flag_bits & 0b00001000)
 		except:
+			print('  Flag bits not implemented:', flag_bits)
 			self.CLIENT_IDENTITY.buffer = b''
 			self.data = None
 			return None
@@ -655,20 +659,26 @@ class WS_FRAME():
 		self.flags['mask'] = bool(mask_and_len & 0b10000000)
 		self.flags['payload_length'] = mask_and_len & 0b01111111
 
+		header_length = 6
 		if self.flags['payload_length'] < 126:
 			self.mask_key = self.CLIENT_IDENTITY.buffer[2:6]
-			payload = self.CLIENT_IDENTITY.buffer[6:6+self.flags['payload_length']]
-			self.CLIENT_IDENTITY.buffer = self.CLIENT_IDENTITY.buffer[6+self.flags['payload_length']:]
+			payload = self.CLIENT_IDENTITY.buffer[header_length:header_length+self.flags['payload_length']]
 		elif self.flags['payload_length'] == 126:
 			self.flags['payload_length'] = struct.unpack('>H', self.CLIENT_IDENTITY.buffer[2:4])[0]
 			self.mask_key = self.CLIENT_IDENTITY.buffer[4:8]
-			payload = self.CLIENT_IDENTITY.buffer[8:8+self.flags['payload_length']]
-			self.CLIENT_IDENTITY.buffer = self.CLIENT_IDENTITY.buffer[8+self.flags['payload_length']:]
+			header_length = 8
+			payload = self.CLIENT_IDENTITY.buffer[header_length:header_length+self.flags['payload_length']]
 		elif self.flags['payload_length'] == 127:
 			self.flags['payload_length'] = struct.unpack('>Q', self.CLIENT_IDENTITY.buffer[2:10])[0]
 			self.mask_key = self.CLIENT_IDENTITY.buffer[10:14]
-			payload = self.CLIENT_IDENTITY.buffer[14:14+self.flags['payload_length']]
-			self.CLIENT_IDENTITY.buffer = self.CLIENT_IDENTITY.buffer[14+self.flags['payload_length']:]
+			header_length = 14
+			payload = self.CLIENT_IDENTITY.buffer[header_length:header_length+self.flags['payload_length']]
+
+		if len(payload) < self.flags['payload_length']:
+			# We do not have all the data yet from our own underlaying socket layer
+			return None
+
+		self.CLIENT_IDENTITY.buffer = self.CLIENT_IDENTITY.buffer[header_length+self.flags['payload_length']:]
 
 		if bool(flag_bits & 0b00001000):
 			self.data = None
@@ -678,7 +688,6 @@ class WS_FRAME():
 			self.data = b''
 			for index, c in enumerate(payload):
 				self.data += bytes([c ^ self.mask_key[(index%4)]])
-
 
 			if self.data == b'PING':
 				#self.ws_send(b'Pong') #?
