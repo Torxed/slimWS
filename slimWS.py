@@ -474,6 +474,9 @@ class WS_CLIENT_IDENTITY():
 			except:
 				pass
 
+		if not b'sec-websocket-key' in request.headers:
+			self.close()
+
 		magic_key = request.headers[b'sec-websocket-key'] + b'258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
 		magic_hash = sha1(magic_key).digest()
 
