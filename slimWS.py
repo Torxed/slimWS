@@ -292,17 +292,17 @@ class WebSocket():
 		
 
 		old_version = False
-		self.log(f'Request to import "{path}"', level=6, origin='importer')
+		self.log(f'Request to import "{path}"', level=logging.DEBUG, origin='importer')
 		if path not in self.loaded_apis:
 			## https://justus.science/blog/2015/04/19/sys.modules-is-dangerous.html
 			try:
-				self.log(f'Loading API module: {path}', level=4, origin='importer')
+				self.log(f'Loading API module: {path}', level=logging.INFO, origin='importer')
 				spec = importlib.util.spec_from_file_location(path, path)
 				self.loaded_apis[path] = importlib.util.module_from_spec(spec)
 				spec.loader.exec_module(self.loaded_apis[path])
 				sys.modules[path] = self.loaded_apis[path]
 			except (SyntaxError, ModuleNotFoundError) as e:
-				self.log(f'Failed to load API module ({e}): {path}', level=2, origin='importer')
+				self.log(f'Failed to load API module ({e}): {path}', level=logging.ERROR, origin='importer')
 				return None
 		else:
 			try:
@@ -378,8 +378,8 @@ class WebSocket():
 				except BaseException as e:
 					exc_type, exc_obj, exc_tb = sys.exc_info()
 					fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
-					self.log(f'Exception in {fname}@{exc_tb.tb_lineno}: {e} ')
-					self.log(traceback.format_exc(), level=2, origin='pre_parser', function='parse')
+					self.log(f'Exception in {fname}@{exc_tb.tb_lineno}: {e} ', level=logging.ERROR)
+					self.log(traceback.format_exc(), level=logging.DEBUG, origin='pre_parser', function='parse')
 			else:
 				self.log(f'Invalid data, trying to load a inexisting module: {frame.data["_module"]} ({str(frame.data)[:200]})')
 
@@ -413,8 +413,8 @@ class WebSocket():
 		except Exception as e:
 			exc_type, exc_obj, exc_tb = sys.exc_info()
 			fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
-			self.log(f'Error in post processing frame {fname}@{exc_tb.tb_lineno}:', frame.data)
-			self.log(traceback.format_exc(), level=3)
+			self.log(f'Error in post processing frame {fname}@{exc_tb.tb_lineno}:', frame.data, level=logging.ERROR)
+			self.log(traceback.format_exc(), level=logging.DEBUG)
 			return None
 
 class WS_CLIENT_IDENTITY():
@@ -465,7 +465,7 @@ class WS_CLIENT_IDENTITY():
 		:return: (TBD) Will return a :class:`~slimWS.WS_CLIENT_IDENTITY` instance.
 		:rtype: :class:`~slimWS.WS_CLIENT_IDENTITY`
 		"""
-		self.server.log(f'Performing upgrade() response for: {self}', level=5, source='WS_CLIENT_IDENTITY.upgrade()')
+		self.server.log(f'Performing upgrade() response for: {self}', level=logging.DEBUG, source='WS_CLIENT_IDENTITY.upgrade()')
 		self.keep_alive = True
 
 		if b'host' in request.headers:
@@ -490,7 +490,7 @@ class WS_CLIENT_IDENTITY():
 		self.socket.send(resp)
 		self.buffer = b''
 
-		self.server.log(f'{self}\'s upgrade response is sent.', level=5, source='WS_CLIENT_IDENTITY.upgrade()')
+		self.server.log(f'{self}\'s upgrade response is sent.', level=logging.DEBUG, source='WS_CLIENT_IDENTITY.upgrade()')
 
 	def close(self):
 		"""
