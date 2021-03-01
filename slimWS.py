@@ -2,6 +2,7 @@ import types, sys, traceback, os
 import importlib.util
 import json
 import struct
+import logging
 from socket import *
 from base64 import b64encode
 from hashlib import sha1, sha512
@@ -194,7 +195,30 @@ class WebSocket():
 		:param *args: Any `str()` valid arguments are valid.
 		:type *args: Positional arguments.
 		"""
-		print(' '.join([str(x) for x in args]))
+		logger = logging.getLogger(__name__)
+		if 'level' in kwargs:
+			if type(kwargs['level']) == str:
+				if kwargs['level'].lower() == 'critical':
+					kwargs['level'] = logging.CRITICAL
+				elif kwargs['level'].lower() == 'erro':
+					kwargs['level'] = logging.ERROR
+				elif kwargs['level'].lower() == 'warning':
+					kwargs['level'] = logging.WARNING
+				elif kwargs['level'].lower() == 'info':
+					kwargs['level'] = logging.INFO
+				elif kwargs['level'].lower() == 'debug':
+					kwargs['level'] = logging.DEBUG
+				# elif kwargs['level'].lower() == 'notset':
+				# 	kwargs['level'] = logging.NOTSET
+			elif type(kwargs['level']) == int:
+				if not kwargs['level'] in (0, 10, 20, 30, 40, 50):
+					raise LoggerError(f"Unable to automatically detect the correct log level for: {args} | {kwargs}")
+			else:
+				raise LoggerError(f"Unknown level definition: {kwargs['level']}")
+		else:
+			kwargs['level'] = logging.INFO
+
+		logger.log(kwargs['level'], ''.join([str(x) for x in args]))
 
 	def frame(self, *args, **kwargs):
 		"""
