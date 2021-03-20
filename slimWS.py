@@ -397,7 +397,7 @@ class WebSocket():
 		"""
 		try:
 			frame.data = json.loads(frame.data.decode('UTF-8'))
-			for data in self.frame_func(frame):
+			for data in (self.frame_func(frame) or []):
 				if type(data) == dict:
 					try:
 						data = json.dumps(data)
